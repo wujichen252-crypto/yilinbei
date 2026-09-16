@@ -1,4 +1,5 @@
 import json
+import re
 import secrets
 from datetime import datetime
 
@@ -169,3 +170,57 @@ def new_code():
         + str(secrets.randbelow(900000) + 100000)
         + str(secrets.randbelow(900) + 100)
     )
+
+
+# --- Laravel-compatible password verification ---------------------------------
+#
+# Django 3.2's check_password() silently returns False for Laravel's raw bcrypt
+# hashes ("$2y$10$..."): identify_hasher() parses the empty string before the
+# leading '$' as the algorithm name, raises ValueError, and check_password
+# swallows it (hashers.py:43-47). Registering a custom PASSWORD_HASHERS entry
+# cannot help -- the hash is never routed to any hasher. So legacy hashes are
+# verified here instead, and upgraded to PBKDF2 on successful login.
+_LARAVEL_BCRYPT_RE = re.compile(r"^\$2[xyab]\$\d{2}\$[./A-Za-z0-9]{53}$")
+
+
+def is_laravel_bcrypt_hash(encoded):
+    """True for Laravel/PHP bcrypt digests: $2y$/$2x$/$2a$/$2b$ + cost + 53 chars, 60 total."""
+    return (isinstance(encoded, str) and len(encoded) == 60
+            and _LARAVEL_BCRYPT_RE.match(encoded) is not None)
+
+
+def verify_user_password(user, raw_password):
+    """check_password() replacement supporting Laravel bcrypt hashes.
+
+    Verifies legacy $2y$ digests via the bcrypt package (transparently
+    re-hashing the row to the preferred PBKDF2 hasher on success) and defers
+    everything else to django.contrib.auth.hashers.check_password.
+    """
+    if raw_password is None:
+        return False
+    encoded = user.password or ""
+    if not is_laravel_bcrypt_hash(encoded):
+        from django.contrib.auth.hashers import check_password
+        return check_password(raw_password, encoded)
+    if not isinstance(raw_password, str):
+        return False  # keep the pre-fix contract: non-string input fails silently
+    try:
+        import bcrypt
+    except ImportError:
+        return False  # missing package must not 500; behaves like before the fix
+    if encoded.startswith("$2y$"):
+        # $2y is byte-for-byte equivalent to $2b (OpenBSD canonical form).
+        # $2x/$2a/$2b are passed through untouched; ValueError below absorbs
+        # any input bcrypt rejects (e.g. passwords over 72 bytes).
+        encoded = "$2b$" + encoded[4:]
+    try:
+        ok = bcrypt.checkpw(raw_password.encode("utf-8"), encoded.encode("ascii"))
+    except ValueError:
+        ok = False
+    if ok:
+        from django.contrib.auth.hashers import make_password
+        user.password = make_password(raw_password)
+        # update_fields keeps updated_at untouched: a hash reformat is not a
+        # content change. (set_password() does not save; explicit save required.)
+        user.save(update_fields=["password"])
+    return ok
