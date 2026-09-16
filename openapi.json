@@ -1,0 +1,1433 @@
+{
+  "openapi": "3.0.2",
+  "info": {
+    "title": "YLB Government Program API",
+    "version": "1.0.0",
+    "description": "Laravel 7 compatibility API migrated to Django Ninja"
+  },
+  "paths": {
+    "/api/login": {
+      "post": {
+        "operationId": "apps_api_views_login",
+        "summary": "Login",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/logout": {
+      "post": {
+        "operationId": "apps_api_views_logout",
+        "summary": "Logout",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/user": {
+      "put": {
+        "operationId": "apps_api_views_user_update",
+        "summary": "User Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/qiniu/token": {
+      "get": {
+        "operationId": "apps_api_views_qiniu_token",
+        "summary": "Qiniu Token",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/file/create": {
+      "post": {
+        "operationId": "apps_api_views_file_create",
+        "summary": "File Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/file/list": {
+      "get": {
+        "operationId": "apps_api_views_file_list",
+        "summary": "File List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/scan/list": {
+      "get": {
+        "operationId": "apps_api_views_scan_list",
+        "summary": "Scan List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/scan/cau": {
+      "post": {
+        "operationId": "apps_api_views_scan_create_update",
+        "summary": "Scan Create Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/scan/files": {
+      "get": {
+        "operationId": "apps_api_views_scan_files",
+        "summary": "Scan Files",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/export/report": {
+      "get": {
+        "operationId": "apps_api_views_export_report",
+        "summary": "Export Report",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/export/person": {
+      "get": {
+        "operationId": "apps_api_views_export_person",
+        "summary": "Export Person",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/export/data": {
+      "get": {
+        "operationId": "apps_api_views_export_data",
+        "summary": "Export Data",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/live/list": {
+      "get": {
+        "operationId": "apps_api_views_live_list",
+        "summary": "Live List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/live/{id}": {
+      "get": {
+        "operationId": "apps_api_views_live_get",
+        "summary": "Live Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/live/": {
+      "put": {
+        "operationId": "apps_api_views_live_update",
+        "summary": "Live Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/index/total": {
+      "get": {
+        "operationId": "apps_api_views_admin_total",
+        "summary": "Admin Total",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/report/list": {
+      "get": {
+        "operationId": "apps_api_views_admin_report_list",
+        "summary": "Admin Report List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/report/check": {
+      "put": {
+        "operationId": "apps_api_views_admin_report_check",
+        "summary": "Admin Report Check",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/recommend/list": {
+      "get": {
+        "operationId": "apps_api_views_admin_recommend_list",
+        "summary": "Admin Recommend List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/user/list": {
+      "get": {
+        "operationId": "admin_user_list",
+        "summary": " List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/user/": {
+      "put": {
+        "operationId": "admin_user_update",
+        "summary": " Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "admin_user_create",
+        "summary": " Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "admin_user_delete",
+        "summary": " Delete",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/user/restore": {
+      "put": {
+        "operationId": "admin_user_restore",
+        "summary": " Restore",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/user/export": {
+      "get": {
+        "operationId": "admin_user_export",
+        "summary": " Export",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/user/{id}": {
+      "get": {
+        "operationId": "admin_user_info",
+        "summary": " Info",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/user/list": {
+      "get": {
+        "operationId": "committee_user_list",
+        "summary": " List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/user/": {
+      "put": {
+        "operationId": "committee_user_update",
+        "summary": " Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "committee_user_create",
+        "summary": " Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "committee_user_delete",
+        "summary": " Delete",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/user/restore": {
+      "put": {
+        "operationId": "committee_user_restore",
+        "summary": " Restore",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/user/export": {
+      "get": {
+        "operationId": "committee_user_export",
+        "summary": " Export",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/user/{id}": {
+      "get": {
+        "operationId": "committee_user_info",
+        "summary": " Info",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/log/list": {
+      "get": {
+        "operationId": "apps_api_views_admin_log_list",
+        "summary": "Admin Log List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/person/list": {
+      "get": {
+        "operationId": "apps_api_views_admin_person_list",
+        "summary": "Admin Person List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/person": {
+      "put": {
+        "operationId": "apps_api_views_admin_person_update",
+        "summary": "Admin Person Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/chouqian/{type}": {
+      "get": {
+        "operationId": "apps_api_views_draw_list",
+        "summary": "Draw List",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "type",
+            "schema": {
+              "title": "Type",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/chouqian/update": {
+      "put": {
+        "operationId": "apps_api_views_draw_update",
+        "summary": "Draw Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/chouqian/export/{type}": {
+      "get": {
+        "operationId": "apps_api_views_draw_export",
+        "summary": "Draw Export",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "type",
+            "schema": {
+              "title": "Type",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/chouqian/exportall": {
+      "get": {
+        "operationId": "apps_api_views_draw_export_all",
+        "summary": "Draw Export All",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/export/data1": {
+      "get": {
+        "operationId": "apps_api_views_admin_export_data1",
+        "summary": "Admin Export Data1",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/export/data2": {
+      "get": {
+        "operationId": "apps_api_views_admin_export_data2",
+        "summary": "Admin Export Data2",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/index/total": {
+      "get": {
+        "operationId": "apps_api_views_committee_total",
+        "summary": "Committee Total",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/report/list": {
+      "get": {
+        "operationId": "apps_api_views_committee_report_list",
+        "summary": "Committee Report List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/report/check": {
+      "put": {
+        "operationId": "apps_api_views_committee_report_check",
+        "summary": "Committee Report Check",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/recommend/list": {
+      "get": {
+        "operationId": "apps_api_views_committee_recommend_list",
+        "summary": "Committee Recommend List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/online/list": {
+      "get": {
+        "operationId": "apps_api_views_committee_online_list",
+        "summary": "Committee Online List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/index/total": {
+      "get": {
+        "operationId": "apps_api_views_city_total",
+        "summary": "City Total",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/index/percent": {
+      "get": {
+        "operationId": "apps_api_views_city_percent",
+        "summary": "City Percent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/index/total": {
+      "get": {
+        "operationId": "apps_api_views_school_total",
+        "summary": "School Total",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/index/percent": {
+      "get": {
+        "operationId": "apps_api_views_school_percent",
+        "summary": "School Percent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/index/total": {
+      "get": {
+        "operationId": "apps_api_views_province_total",
+        "summary": "Province Total",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/index/percent": {
+      "get": {
+        "operationId": "apps_api_views_province_percent",
+        "summary": "Province Percent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/list": {
+      "get": {
+        "operationId": "city_report_list",
+        "summary": " List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/create": {
+      "post": {
+        "operationId": "city_report_create",
+        "summary": " Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/update": {
+      "put": {
+        "operationId": "city_report_update",
+        "summary": " Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/delete/{id}": {
+      "delete": {
+        "operationId": "city_report_delete",
+        "summary": " Delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/{id}": {
+      "get": {
+        "operationId": "city_report_get",
+        "summary": " Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/recommend/list": {
+      "get": {
+        "operationId": "city_recommend_list",
+        "summary": " Recommend List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/recommend/cau": {
+      "post": {
+        "operationId": "city_recommend_create_update",
+        "summary": " Recommend Cau",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/list": {
+      "get": {
+        "operationId": "school_report_list",
+        "summary": " List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/create": {
+      "post": {
+        "operationId": "school_report_create",
+        "summary": " Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/update": {
+      "put": {
+        "operationId": "school_report_update",
+        "summary": " Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/delete/{id}": {
+      "delete": {
+        "operationId": "school_report_delete",
+        "summary": " Delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/{id}": {
+      "get": {
+        "operationId": "school_report_get",
+        "summary": " Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/recommend/list": {
+      "get": {
+        "operationId": "school_recommend_list",
+        "summary": " Recommend List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/recommend/cau": {
+      "post": {
+        "operationId": "school_recommend_create_update",
+        "summary": " Recommend Cau",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/report/list": {
+      "get": {
+        "operationId": "province_report_list",
+        "summary": " List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/report/create": {
+      "post": {
+        "operationId": "province_report_create",
+        "summary": " Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/report/update": {
+      "put": {
+        "operationId": "province_report_update",
+        "summary": " Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/report/delete/{id}": {
+      "delete": {
+        "operationId": "province_report_delete",
+        "summary": " Delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/report/{id}": {
+      "get": {
+        "operationId": "province_report_get",
+        "summary": " Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/recommend/list": {
+      "get": {
+        "operationId": "province_recommend_list",
+        "summary": " Recommend List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/province/recommend/cau": {
+      "post": {
+        "operationId": "province_recommend_create_update",
+        "summary": " Recommend Cau",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/ticket/list": {
+      "get": {
+        "operationId": "apps_api_views_ticket_list",
+        "summary": "Ticket List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/ticket/message/{code}": {
+      "get": {
+        "operationId": "apps_api_views_ticket_message",
+        "summary": "Ticket Message",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "code",
+            "schema": {
+              "title": "Code",
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/ticket/my": {
+      "get": {
+        "operationId": "apps_api_views_my_ticket",
+        "summary": "My Ticket",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/ticket/make": {
+      "post": {
+        "operationId": "apps_api_views_make_ticket",
+        "summary": "Make Ticket",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {},
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "servers": null
+}
