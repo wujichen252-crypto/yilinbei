@@ -8,7 +8,7 @@
 - Role denial: HTTP 403, `{ "error": "无该页面操作权限！" }`.
 - Missing/invalid bearer: HTTP 401.
 
-The returned token is an `id|random` bearer value; only its SHA-256 digest is stored. Laravel bcrypt password hashes are accepted by Django's `check_password`.
+The returned token is an `id|random` bearer value; only its SHA-256 digest is stored. Django 3.2's `check_password` **silently rejects** Laravel bcrypt (`$2y$…`) hashes: `identify_hasher` parses an empty algorithm name from the leading `$` and the resulting `ValueError` is swallowed (returns `False`), so no `PASSWORD_HASHERS` entry can ever route them. Login verifies legacy digests via `apps.core.services.verify_user_password` (the `bcrypt` package, with `$2y$`→`$2b$` normalization) and transparently re-hashes the row to the preferred PBKDF2 hasher on success.
 
 ## Preserved endpoint behavior
 

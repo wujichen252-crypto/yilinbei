@@ -22,7 +22,8 @@ from apps.core.models import (Crew, Draw, Files, Leader, LiveReport, Logs,
 from apps.core.services import (attach_report_people, failure, list_page,
                                 live_report_dict, model_dict, new_code,
                                 parse_body, report_dict, store_people,
-                                success, user_dict, write_log)
+                                success, user_dict, verify_user_password,
+                                write_log)
 
 from .auth import BearerAuth
 from .export_services import (
@@ -193,18 +194,34 @@ def xlsx_response(rows, filename):
     return result
 
 
+def _cjk_pdf_font():
+    """Reportlab's built-in Adobe CJK face; no external font file required.
+
+    Non-embedded (viewer supplies the glyphs); registration is idempotent.
+    """
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    name = "STSong-Light"
+    if name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(UnicodeCIDFont(name))
+    return name
+
+
 def pdf_response(rows, filename):
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.pdfgen import canvas
         output = io.BytesIO()
         canvas_obj = canvas.Canvas(output, pagesize=A4)
+        font = _cjk_pdf_font()
+        canvas_obj.setFont(font, 9)
         y = 810
         for row in rows:
             canvas_obj.drawString(36, y, " | ".join(str(x or "") for x in row)[:180])
             y -= 16
             if y < 40:
                 canvas_obj.showPage(); y = 810
+                canvas_obj.setFont(font, 9)  # showPage resets graphics state
         canvas_obj.save()
         content = output.getvalue()
     except ImportError:
@@ -220,8 +237,7 @@ def login(request):
     user = User.objects.filter(username=data.get("username", "")).first()
     if not user:
         return response(failure("用户不存在"))
-    from django.contrib.auth.hashers import check_password
-    if not check_password(data.get("password", ""), user.password):
+    if not verify_user_password(user, data.get("password", "")):
         return response(failure("账号或密码错误"))
     from apps.core.models import PersonalAccessToken
     token, plain = PersonalAccessToken.issue(user)

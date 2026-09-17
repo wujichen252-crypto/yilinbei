@@ -41,3 +41,41 @@ class ExportCompatibilityTests(ApiTestCase):
         data2 = admin_data2_rows([report])
         self.assertEqual(len(data2[0]), 35)
         self.assertEqual(data2[1][16], "2分0秒")
+
+
+class PdfExportTests(ApiTestCase):
+    """HTTP-level checks for the two reportlab endpoints (first coverage there).
+
+    The STSong-Light assertion relies on reportlab's default pageCompression=0,
+    which keeps font resource names visible in the raw bytes.
+    """
+
+    def setUp(self):
+        self.school = self.create_user("school", 0)
+        self.authorize_as(self.school)
+
+    def test_export_report_returns_pdf_with_cjk_font_resource(self):
+        self.make_report(self.school, status=0, school_name="测试学校", name1="月亮之歌")
+
+        result = self.client.get("/api/export/report")
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result["Content-Type"], "application/pdf")
+        self.assertTrue(result.content.startswith(b"%PDF-"))  # not the CSV fallback
+        self.assertIn(b"STSong-Light", result.content)
+
+    def test_export_person_returns_pdf_and_requires_auth(self):
+        report = self.make_report(self.school, status=0)
+        person = Person.objects.create(
+            name="正式队员", user_id=self.school.id, card="pdf-card", school="测试学校"
+        )
+        ReportPerson.objects.create(report_id=report.id, person_id=person.id, position=0, type=0)
+
+        result = self.client.get("/api/export/person")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result["Content-Type"], "application/pdf")
+        self.assertTrue(result.content.startswith(b"%PDF-"))
+        self.assertIn(b"STSong-Light", result.content)
+
+        self.clear_authorization()
+        self.assertEqual(self.client.get("/api/export/person").status_code, 401)

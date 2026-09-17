@@ -1,11 +1,22 @@
+import unittest
 from datetime import timedelta
 
 from django.test import override_settings
 from django.utils import timezone
 
-from apps.core.models import PersonalAccessToken
+from apps.core.models import PersonalAccessToken, User
 
 from .base import ApiTestCase
+
+try:
+    import bcrypt  # noqa: F401
+    HAVE_BCRYPT = True
+except ImportError:
+    HAVE_BCRYPT = False
+
+# A real Laravel-style bcrypt digest of the password "pw", generated with:
+#   python -c "import bcrypt; h=bcrypt.hashpw(b'pw', bcrypt.gensalt(10, prefix=b'2b')).decode(); print('$2y$'+h[4:])"
+LARAVEL_PW_HASH = "$2y$10$m0OVXEJF5/UUuGOrXFIkgOJDrecupQgpaIpU.V59SMl3iLseuwhKy"
 
 
 class AuthenticationContractTests(ApiTestCase):
@@ -127,3 +138,66 @@ class RolePermissionTests(ApiTestCase):
         user.refresh_from_db()
         self.assertEqual(user.nickname, "新名称")
         self.assertEqual(user.type, 0)
+
+
+@unittest.skipUnless(HAVE_BCRYPT, "bcrypt 未安装：pip install -r requirements.txt")
+class LegacyBcryptLoginTests(ApiTestCase):
+    """存量 Laravel bcrypt 用户登录：兼容校验 + 成功后透明升级 PBKDF2。"""
+
+    def _legacy_user(self):
+        # Bypass create_user()/set_password() to mirror import_laravel_data.py,
+        # which stores the raw bcrypt digest exactly as found in the old database.
+        user = User(username="legacy", nickname="老系统", type=0)
+        user.password = LARAVEL_PW_HASH
+        user.save()
+        return user
+
+    def test_login_with_laravel_hash_succeeds_and_upgrades_to_pbkdf2(self):
+        user = self._legacy_user()
+        before_updated_at = user.updated_at
+
+        result = self.json_request("post", "/api/login", {"username": "legacy", "password": "pw"})
+
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertEqual(payload["code"], 0)
+        self.assertEqual(payload["msg"], "登录成功")
+        self.assertRegex(payload["data"]["token"], r"^\d+\|[0-9a-f]{40}$")
+        self.assertEqual(payload["data"]["user"], {
+            "id": user.id, "username": "legacy", "nickname": "老系统",
+            "description": "", "tel": "", "leader": "", "type": 0, "parent_id": None,
+        })
+        self.assertTrue(PersonalAccessToken.objects.filter(tokenable_id=user.id).exists())
+        user.refresh_from_db()
+        self.assertTrue(user.password.startswith("pbkdf2_sha256$"))
+        # A hash reformat is not a content change: updated_at must not move.
+        self.assertEqual(user.updated_at, before_updated_at)
+
+    def test_wrong_password_is_rejected_and_hash_untouched(self):
+        user = self._legacy_user()
+
+        result = self.json_request("post", "/api/login", {"username": "legacy", "password": "wrong"})
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json(), {"code": 1, "msg": "账号或密码错误", "data": None})
+        self.assertFalse(PersonalAccessToken.objects.exists())
+        user.refresh_from_db()
+        self.assertEqual(user.password, LARAVEL_PW_HASH)
+
+    def test_upgraded_user_and_native_pbkdf2_user_relogin(self):
+        legacy = self._legacy_user()
+        self.json_request("post", "/api/login", {"username": "legacy", "password": "pw"})
+        legacy.refresh_from_db()
+        upgraded_hash = legacy.password
+
+        second = self.json_request("post", "/api/login", {"username": "legacy", "password": "pw"})
+        self.assertEqual(second.json()["code"], 0)
+        legacy.refresh_from_db()
+        # Second login goes through the plain Django path and must not rewrite.
+        self.assertEqual(legacy.password, upgraded_hash)
+
+        modern = self.create_user("modern", 0)
+        result = self.json_request("post", "/api/login", {"username": "modern", "password": "pw"})
+        self.assertEqual(result.json()["code"], 0)
+        modern.refresh_from_db()
+        self.assertTrue(modern.password.startswith("pbkdf2_sha256$"))
