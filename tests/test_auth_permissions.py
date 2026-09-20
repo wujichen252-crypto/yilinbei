@@ -139,6 +139,29 @@ class RolePermissionTests(ApiTestCase):
         self.assertEqual(user.nickname, "新名称")
         self.assertEqual(user.type, 0)
 
+    def test_admin_and_committee_report_extensions_are_role_gated(self):
+        report = self.make_report(self.users[0])
+        routes = [
+            f"/api/admin/report/{report.id}",
+            "/api/admin/report/update",
+            f"/api/committee/report/{report.id}",
+            "/api/committee/report/update",
+        ]
+
+        for route in routes:
+            expected = 3 if route.startswith("/api/admin/") else 2
+            for user_type in range(5):
+                if user_type == expected:
+                    continue
+                with self.subTest(route=route, user_type=user_type):
+                    self.authorize_as(self.users[user_type])
+                    if route.endswith("update"):
+                        denied = self.json_request("put", route, {"id": report.id})
+                    else:
+                        denied = self.client.get(route)
+                    self.assertEqual(denied.status_code, 403)
+                    self.assertEqual(denied.json(), {"error": "无该页面操作权限！"})
+
 
 @unittest.skipUnless(HAVE_BCRYPT, "bcrypt 未安装：pip install -r requirements.txt")
 class LegacyBcryptLoginTests(ApiTestCase):

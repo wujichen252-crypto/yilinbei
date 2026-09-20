@@ -115,17 +115,19 @@ def create_report(request, province=False):
     return response(success("创建成功", report_dict(report)))
 
 
-def update_report(request):
+def update_report(request, on_behalf=False):
     user = request.auth
     data = body(request)
     report = Report.objects.filter(pk=data.get("id")).first()
     if not report:
         return response(failure("报名表不存在！"))
-    if report.user_id != user.id:
+    if not on_behalf and report.user_id != user.id:
         return response(failure("不具备该报表修改信息权限！"))
     people = data.get("person", [])
     with transaction.atomic():
-        ok, stored = store_people(user, people)
+        # Admin/committee edits stay attributed to the owning school so the
+        # report's ownership and its people records never change hands.
+        ok, stored = store_people(report.user_id if on_behalf else user, people)
         if not ok:
             transaction.set_rollback(True)
             return response(failure(stored))
@@ -136,12 +138,21 @@ def update_report(request):
                 setattr(report, key, value)
         if "dinner_reservation" in fields:
             report.dinner_reservation = data.get("dinner_reservation") or []
-        report.user_id = user.id
+        if not on_behalf:
+            report.user_id = user.id
         report.status = 0
         report.save()
         attach_report_people(report.id, stored)
     write_log(user, 1, "修改节目报名表 " + str(data.get("name", report.name)))
     return response(success("修改成功！", None))
+
+
+def report_detail(request, expected, id):
+    err = role_error(request, expected)
+    report = Report.objects.filter(pk=id).first()
+    if err: return err
+    if not report: return response(success("获取成功！", None))
+    return response(success("获取成功！", report_dict(report)))
 
 
 def recommend_dict(item):
@@ -449,6 +460,20 @@ def admin_report_check(request):
     return response(success("审核成功！", changed))
 
 
+# The PUT route must be registered before GET "/admin/report/{id}": the
+# {id} pattern also matches the literal "update", and Ninja picks the first
+# URL match, so a later registration would end up 405 on PUT.
+@api.put("/admin/report/update", auth=auth)
+def admin_report_update(request):
+    err = role_error(request, 3)
+    return err or update_report(request, on_behalf=True)
+
+
+@api.get("/admin/report/{id}", auth=auth)
+def admin_report_get(request, id: int):
+    return report_detail(request, 3, id)
+
+
 @api.get("/admin/recommend/list", auth=auth)
 def admin_recommend_list(request):
     err = role_error(request, 3)
@@ -638,6 +663,18 @@ def committee_report_check(request):
     data = body(request); ids = data.get("id", []) if isinstance(data.get("id"), list) else [data.get("id")]
     changed = Report.objects.filter(id__in=[x for x in ids if x is not None]).update(status=data.get("status"), remark=data.get("remark"))
     return response(success("审核成功！", changed))
+
+
+# Same ordering constraint as the admin routes: PUT before GET "/{id}".
+@api.put("/committee/report/update", auth=auth)
+def committee_report_update(request):
+    err = role_error(request, 2)
+    return err or update_report(request, on_behalf=True)
+
+
+@api.get("/committee/report/{id}", auth=auth)
+def committee_report_get(request, id: int):
+    return report_detail(request, 2, id)
 
 
 @api.get("/committee/recommend/list", auth=auth)

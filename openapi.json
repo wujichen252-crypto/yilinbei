@@ -317,6 +317,50 @@
         ]
       }
     },
+    "/api/admin/report/update": {
+      "put": {
+        "operationId": "apps_api_views_admin_report_update",
+        "summary": "Admin Report Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/report/{id}": {
+      "get": {
+        "operationId": "apps_api_views_admin_report_get",
+        "summary": "Admin Report Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/admin/recommend/list": {
       "get": {
         "operationId": "apps_api_views_admin_recommend_list",
@@ -796,6 +840,50 @@
         "operationId": "apps_api_views_committee_report_check",
         "summary": "Committee Report Check",
         "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/report/update": {
+      "put": {
+        "operationId": "apps_api_views_committee_report_update",
+        "summary": "Committee Report Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/report/{id}": {
+      "get": {
+        "operationId": "apps_api_views_committee_report_get",
+        "summary": "Committee Report Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"

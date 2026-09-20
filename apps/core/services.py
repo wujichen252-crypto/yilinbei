@@ -108,7 +108,7 @@ def store_people(user, people):
         values.pop("position", None)
         values.pop("type", None)
         values.pop("id", None)
-        values["user_id"] = user.id
+        values["user_id"] = getattr(user, "id", user)
         if person:
             for key in {f.name for f in Person._meta.fields}:
                 if key in values:

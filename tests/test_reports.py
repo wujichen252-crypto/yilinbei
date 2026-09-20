@@ -112,3 +112,99 @@ class ReportTransactionAndSoftDeleteTests(ApiTestCase):
         self.assertEqual(len(links), 1)
         self.assertEqual(links[0].position, 2)
         self.assertEqual(Person.objects.get(pk=links[0].person_id).card, "new-card")
+
+
+class AdminCommitteeReportExtensionTests(ApiTestCase):
+    """管理员/委员会查看与代改任意报名（V2 扩展的 4 条接口）。"""
+
+    def setUp(self):
+        self.school = self.create_user("school", 0)
+        self.admin = self.create_user("admin", 3)
+        self.committee = self.create_user("committee", 2)
+        self.report = self.make_report(self.school, status=1)
+
+    def detail_routes(self):
+        return [
+            (self.admin, "/api/admin/report/{}"),
+            (self.committee, "/api/committee/report/{}"),
+        ]
+
+    def update_routes(self):
+        return [
+            (self.admin, "/api/admin/report/update"),
+            (self.committee, "/api/committee/report/update"),
+        ]
+
+    def test_any_report_detail_is_readable(self):
+        for user, route in self.detail_routes():
+            with self.subTest(user=user.username):
+                self.authorize_as(user)
+                result = self.client.get(route.format(self.report.id))
+                self.assertEqual(result.status_code, 200)
+                payload = result.json()
+                self.assertEqual(payload["code"], 0)
+                self.assertEqual(payload["data"]["name"], "测试节目")
+                self.assertEqual(payload["data"]["user"]["id"], self.school.id)
+                self.assertEqual(payload["data"]["status"], 1)
+
+    def test_detail_of_missing_report_returns_success_with_null_data(self):
+        self.authorize_as(self.admin)
+
+        result = self.client.get("/api/admin/report/9999")
+
+        self.assertEqual(result.json()["code"], 0)
+        self.assertIsNone(result.json()["data"])
+
+    def test_on_behalf_update_keeps_school_ownership_and_resets_review(self):
+        for user, route in self.update_routes():
+            with self.subTest(user=user.username):
+                report = self.make_report(self.school, status=1)
+                self.authorize_as(user)
+                payload = {
+                    "id": report.id,
+                    "choir_name": "代改团队",
+                    "name": "代改节目",
+                    "group": "大学组",
+                    "establishment": "管乐团",
+                    "contact_name": "联系人",
+                    "contact_phone": "13800000000",
+                    "time_length": 120,
+                    "person": [{"name": "新成员", "card": "onbehalf-card",
+                                "position": 0, "type": 0}],
+                }
+
+                result = self.json_request("put", route, payload)
+
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.json()["code"], 0)
+                report.refresh_from_db()
+                # Ownership and attribution stay with the school; the edit only
+                # resets the review state exactly like a school-side edit does.
+                self.assertEqual(report.user_id, self.school.id)
+                self.assertEqual(report.name, "代改节目")
+                self.assertEqual(report.status, 0)
+                link = ReportPerson.objects.filter(report_id=report.id).first()
+                self.assertIsNotNone(link)
+                self.assertEqual(
+                    Person.objects.get(pk=link.person_id).user_id, self.school.id
+                )
+
+    def test_on_behalf_update_cannot_reassign_user_id(self):
+        self.authorize_as(self.admin)
+
+        result = self.json_request("put", "/api/admin/report/update", {
+            "id": self.report.id, "name": "改名", "user_id": self.admin.id,
+        })
+
+        self.assertEqual(result.json()["code"], 0)
+        self.report.refresh_from_db()
+        self.assertEqual(self.report.user_id, self.school.id)
+
+    def test_on_behalf_update_of_missing_report_fails_cleanly(self):
+        self.authorize_as(self.committee)
+
+        result = self.json_request("put", "/api/committee/report/update",
+                                   {"id": 9999, "name": "不存在"})
+
+        self.assertEqual(result.json()["code"], 1)
+        self.assertEqual(result.json()["msg"], "报名表不存在！")
