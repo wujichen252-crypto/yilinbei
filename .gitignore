@@ -1,2 +1,16 @@
 # Claude Code Memory Bank（本地上下文文件，不入库）
 CLAUDE-*.md
+
+# Local secrets & environment
+.env
+
+# Local database / build artifacts
+db.sqlite3
+staticfiles/
+media/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
