@@ -7,11 +7,8 @@ denials use 401/403 as the original middleware did.
 import csv
 import io
 import json
-<<<<<<< Updated upstream
-import uuid
-=======
 import logging
->>>>>>> Stashed changes
+import uuid
 from datetime import datetime
 
 from django.conf import settings
@@ -873,7 +870,6 @@ def make_ticket(request):
     return response(success("预约成功！", model_dict(obj)))
 
 
-<<<<<<< Updated upstream
 # --- 阿里云 OSS 直传（方案 B：STS 临时凭证）---
 # 前端拿到响应后用 ali-oss 直传 bucket，服务器只签发短期凭证，不经手文件流。
 OSS_BIZ_RULES = {
@@ -965,7 +961,8 @@ def oss_token(request):
         "host": host,
         "key": key,
     }))
-=======
+
+
 # --- Deployment health probe -------------------------------------------------
 #
 # Consumed by the automated deployment pipeline (see
@@ -998,4 +995,3 @@ def _health(request):
 # ``/api/health/`` keeps a manual ``curl`` from silently 404ing.
 api.get("/health", operation_id="health")(_health)
 api.get("/health/", operation_id="health_with_trailing_slash")(_health)
->>>>>>> Stashed changes
