@@ -3,6 +3,10 @@
 Column names intentionally follow the Laravel migrations so an existing PostgreSQL
 database can be attached without a destructive rename. Foreign keys retain their
 integer semantics because the source migrations did not declare database FKs.
+
+NOT NULL string columns default to a single space: GaussDB (PostgreSQL 9.2.4
+compatibility) treats empty-string writes on NOT NULL columns as NULL, so legacy
+seed values use " " instead of "".
 """
 import hashlib
 import json
@@ -18,7 +22,7 @@ class LegacyJSONField(models.TextField):
 
     The source migrations store these values as strings and model accessors
     decode them. Keeping the physical type textual avoids requiring JSONB
-    support from PostgreSQL 9.6/GaussDB while preserving Python list/dict APIs.
+    support from PostgreSQL 9.2.4/GaussDB while preserving Python list/dict APIs.
     """
     description = "JSON encoded legacy text"
 
@@ -75,8 +79,8 @@ class User(AbstractBaseUser):
     TYPE_ADMIN = 3
     TYPE_PROVINCE = 4
     id = models.BigAutoField(primary_key=True)
-    username = models.CharField(max_length=30, unique=True)
-    nickname = models.CharField(max_length=255)
+    username = models.CharField(max_length=30, unique=True, default=" ")
+    nickname = models.CharField(max_length=255, default=" ")
     description = models.CharField(max_length=1000, default="", blank=True, null=True)
     tel = models.CharField(max_length=50, default="", blank=True, null=True)
     leader = models.CharField(max_length=50, default="", blank=True, null=True)
@@ -122,8 +126,8 @@ class PersonalAccessToken(models.Model):
     id = models.BigAutoField(primary_key=True)
     tokenable_type = models.CharField(max_length=255, default="App\\Models\\User")
     tokenable_id = models.BigIntegerField()
-    name = models.CharField(max_length=255)
-    token = models.CharField(max_length=64, unique=True)
+    name = models.CharField(max_length=255, default=" ")
+    token = models.CharField(max_length=64, unique=True, default=" ")
     abilities = models.TextField(null=True, blank=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -167,16 +171,16 @@ class PersonalAccessToken(models.Model):
 class Report(models.Model):
     id = models.BigAutoField(primary_key=True)
     user_id = models.IntegerField(db_index=True)
-    choir_name = models.CharField(max_length=255)
-    name = models.CharField(max_length=255)
+    choir_name = models.CharField(max_length=255, default=" ")
+    name = models.CharField(max_length=255, default=" ")
     name1 = models.CharField(max_length=255, null=True, blank=True)
     school_name = models.CharField(max_length=255, null=True, blank=True)
     desc = models.CharField(max_length=1000, null=True, blank=True)
-    group = models.CharField(max_length=255)
-    establishment = models.CharField(max_length=255)
+    group = models.CharField(max_length=255, default=" ")
+    establishment = models.CharField(max_length=255, default=" ")
     establishment_name = models.CharField(max_length=255, null=True, blank=True)
-    contact_name = models.CharField(max_length=255)
-    contact_phone = models.CharField(max_length=255)
+    contact_name = models.CharField(max_length=255, default=" ")
+    contact_phone = models.CharField(max_length=255, default=" ")
     contact_way = models.CharField(max_length=255, null=True, blank=True)
     time_length = models.IntegerField(default=0)
     spectrum = models.IntegerField(null=True, blank=True)
@@ -201,9 +205,9 @@ class Report(models.Model):
 
 class Person(models.Model):
     id = models.BigAutoField(primary_key=True)
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, default=" ")
     user_id = models.IntegerField()
-    card = models.CharField(max_length=255, unique=True)
+    card = models.CharField(max_length=255, unique=True, default=" ")
     age = models.IntegerField(null=True, blank=True)
     school = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=255, null=True, blank=True)
@@ -240,7 +244,7 @@ class Logs(models.Model):
     id = models.BigAutoField(primary_key=True)
     user_id = models.BigIntegerField()
     type = models.IntegerField()
-    content = models.CharField(max_length=5000)
+    content = models.CharField(max_length=5000, default=" ")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -252,10 +256,10 @@ class Logs(models.Model):
 class Files(models.Model):
     id = models.BigAutoField(primary_key=True)
     user_id = models.IntegerField()
-    filename = models.CharField(max_length=255)
-    type = models.CharField(max_length=255)
+    filename = models.CharField(max_length=255, default=" ")
+    type = models.CharField(max_length=255, default=" ")
     size = models.FloatField()
-    url = models.CharField(max_length=255)
+    url = models.CharField(max_length=255, default=" ")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -294,12 +298,12 @@ class LiveReport(models.Model):
     id = models.BigAutoField(primary_key=True)
     user_id = models.IntegerField()
     report_id = models.BigIntegerField()
-    name = models.CharField(max_length=255)
-    choir_name = models.CharField(max_length=255)
-    district_or_school_name = models.CharField(max_length=255)
-    group = models.CharField(max_length=255)
-    contact_name = models.CharField(max_length=255)
-    contact_phone = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, default=" ")
+    choir_name = models.CharField(max_length=255, default=" ")
+    district_or_school_name = models.CharField(max_length=255, default=" ")
+    group = models.CharField(max_length=255, default=" ")
+    contact_name = models.CharField(max_length=255, default=" ")
+    contact_phone = models.CharField(max_length=255, default=" ")
     files = LegacyJSONField(null=True, blank=True)
     status = models.IntegerField(default=0)
     remark = models.CharField(max_length=255, null=True, blank=True)
@@ -315,8 +319,8 @@ class LiveReport(models.Model):
 class Crew(models.Model):
     id = models.BigAutoField(primary_key=True)
     live_report_id = models.IntegerField()
-    name = models.CharField(max_length=255)
-    card = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, default=" ")
+    card = models.CharField(max_length=255, default=" ")
     age = models.IntegerField(null=True, blank=True)
     school = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=255, null=True, blank=True)
@@ -339,13 +343,13 @@ class Crew(models.Model):
 class Leader(models.Model):
     id = models.BigAutoField(primary_key=True)
     live_report_id = models.IntegerField()
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, default=" ")
     gender = models.IntegerField(default=0)
     linkman = models.IntegerField(default=0)
     age = models.IntegerField(default=0)
     unit = models.CharField(max_length=255, null=True, blank=True)
-    card = models.CharField(max_length=255)
-    phone = models.CharField(max_length=255)
+    card = models.CharField(max_length=255, default=" ")
+    phone = models.CharField(max_length=255, default=" ")
     arrival_time = models.DateField(null=True, blank=True)
     departure_time = models.DateField(null=True, blank=True)
     head = models.CharField(max_length=255, null=True, blank=True)
@@ -359,7 +363,7 @@ class Leader(models.Model):
 
 class Draw(models.Model):
     id = models.BigAutoField(primary_key=True)
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, default=" ")
     type = models.IntegerField()
     index = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -371,7 +375,7 @@ class Draw(models.Model):
 
 class Ticket(models.Model):
     id = models.BigAutoField(primary_key=True)
-    type_name = models.CharField(max_length=255)
+    type_name = models.CharField(max_length=255, default=" ")
     ticket_session = models.CharField(max_length=255, null=True, blank=True)
     time = models.CharField(max_length=255, null=True, blank=True)
     week = models.CharField(max_length=255, null=True, blank=True)
@@ -389,11 +393,11 @@ class Ticket(models.Model):
 class TicketSubscribe(models.Model):
     id = models.BigAutoField(primary_key=True)
     ticket_id = models.IntegerField()
-    name = models.CharField(max_length=255)
-    card = models.CharField(max_length=255)
-    phone = models.CharField(max_length=255)
-    ip = models.CharField(max_length=255)
-    code = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, default=" ")
+    card = models.CharField(max_length=255, default=" ")
+    phone = models.CharField(max_length=255, default=" ")
+    ip = models.CharField(max_length=255, default=" ")
+    code = models.CharField(max_length=255, default=" ")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -403,7 +407,7 @@ class TicketSubscribe(models.Model):
 
 class Student(models.Model):
     id = models.BigAutoField(primary_key=True)
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, default=" ")
     user_id = models.IntegerField()
     gender = models.IntegerField(null=True, blank=True)
     age = models.IntegerField(null=True, blank=True)
@@ -438,8 +442,8 @@ class Statistics(models.Model):
 
 
 class PasswordReset(models.Model):
-    email = models.CharField(max_length=255, db_index=True)
-    token = models.CharField(max_length=255)
+    email = models.CharField(max_length=255, db_index=True, default=" ")
+    token = models.CharField(max_length=255, default=" ")
     created_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
