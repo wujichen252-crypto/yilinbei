@@ -224,3 +224,51 @@ class LegacyBcryptLoginTests(ApiTestCase):
         self.assertEqual(result.json()["code"], 0)
         modern.refresh_from_db()
         self.assertTrue(modern.password.startswith("pbkdf2_sha256$"))
+
+
+class CurrentUserInfoTests(ApiTestCase):
+    """GET /api/user：只认 token，返回当前登录用户自己（复用 user_dict）。"""
+
+    def setUp(self):
+        self.users = {
+            0: self.create_user("school", 0, tel="13800138000", leader="张三"),
+            1: self.create_user("city", 1),
+            2: self.create_user("committee", 2),
+            3: self.create_user("admin", 3),
+            4: self.create_user("province", 4),
+        }
+
+    def test_every_role_reads_its_own_record(self):
+        for user_type, user in self.users.items():
+            with self.subTest(user_type=user_type):
+                self.authorize_as(user)
+                result = self.client.get("/api/user")
+                self.assertEqual(result.status_code, 200)
+                payload = result.json()
+                self.assertEqual(payload["code"], 0)
+                self.assertEqual(payload["msg"], "获取成功")
+                self.assertEqual(payload["data"]["id"], user.id)
+                self.assertEqual(payload["data"]["username"], user.username)
+                self.assertNotIn("password", payload["data"])
+
+    def test_optional_fields_are_normalized_to_empty_strings(self):
+        user = self.users[0]
+        self.authorize_as(user)
+        payload = self.client.get("/api/user").json()["data"]
+        for field in ("nickname", "description", "tel", "leader"):
+            self.assertIn(field, payload)
+            self.assertNotEqual(payload[field], None)
+        self.assertEqual(payload["tel"], "13800138000")
+        self.assertEqual(payload["leader"], "张三")
+
+    def test_get_user_requires_token(self):
+        self.assertEqual(self.client.get("/api/user").status_code, 401)
+
+    def test_put_then_get_roundtrip(self):
+        user = self.users[0]
+        self.authorize_as(user)
+        update = self.json_request("put", "/api/user",
+                                   {"id": user.id, "nickname": "新昵称"})
+        self.assertEqual(update.json()["code"], 0)
+        payload = self.client.get("/api/user").json()["data"]
+        self.assertEqual(payload["nickname"], "新昵称")

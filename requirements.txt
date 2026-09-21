@@ -8,6 +8,9 @@ openpyxl==3.1.5
 Pillow==10.4.0
 reportlab==4.2.2
 qiniu==7.15.0
+oss2==2.18.4
+aliyun-python-sdk-core==2.16.0
+aliyun-python-sdk-sts==3.1.2
 gunicorn==22.0.0
 whitenoise==6.7.0
 django-cors-headers==3.13.0
