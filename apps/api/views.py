@@ -7,14 +7,17 @@ denials use 401/403 as the original middleware did.
 import csv
 import io
 import json
+import logging
+import uuid
 from datetime import datetime
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from ninja import NinjaAPI
+from ninja.errors import HttpError
 
 from apps.core.models import (Crew, Draw, Files, Leader, LiveReport, Logs,
                               Person, Recommend, Report, ReportPerson,
@@ -269,6 +272,16 @@ def logout(request):
             ).delete()
     write_log(request.auth, 5, "用户退出")
     return response(success("退出成功"))
+
+
+@api.get("/user", auth=auth)
+def user_info(request):
+    # 读取当前登录用户：只认 request.auth，不接受任何 query/body 里的用户 id，
+    # 复用 user_dict 保证与登录接口返回结构一致（且永不回传 password）。
+    user = User.objects.filter(pk=request.auth.id).first()
+    if not user:
+        return response(failure("用户不存在"))
+    return response(success("获取成功", user_dict(user)))
 
 
 @api.put("/user", auth=auth)
@@ -855,3 +868,130 @@ def make_ticket(request):
             return response(failure("已预约满！"))
         obj = TicketSubscribe.objects.create(ticket_id=ticket.id, name=data.get("name", ""), card=data.get("card", ""), phone=data.get("phone", ""), ip=request.META.get("REMOTE_ADDR", ""), code=new_code())
     return response(success("预约成功！", model_dict(obj)))
+
+
+# --- 阿里云 OSS 直传（方案 B：STS 临时凭证）---
+# 前端拿到响应后用 ali-oss 直传 bucket，服务器只签发短期凭证，不经手文件流。
+OSS_BIZ_RULES = {
+    # biz: (中文名, 大小上限字节, 允许的 content type)
+    "video": ("视频", 700 * 1024 * 1024, {"video/mp4", "video/quicktime"}),
+    "image": ("图片", 1 * 1024 * 1024, {"image/jpeg", "image/png"}),
+    "photo": ("照片", 20 * 1024 * 1024, {"image/jpeg", "image/tiff"}),
+    "spectrum": ("曲谱", 20 * 1024 * 1024, {"application/pdf"}),
+    "doc": ("文件", 20 * 1024 * 1024, {"application/pdf"}),
+}
+OSS_STS_ACTIONS = ["oss:PutObject", "oss:AbortMultipartUpload",
+                   "oss:ListParts", "oss:ListMultipartUploads"]
+
+
+def oss_configured():
+    return bool(settings.ALIYUN_OSS_ACCESS_KEY_ID
+                and settings.ALIYUN_OSS_ACCESS_KEY_SECRET
+                and settings.ALIYUN_OSS_BUCKET
+                and settings.ALIYUN_OSS_STS_ROLE_ARN)
+
+
+def _assume_oss_role(session_policy):
+    """用长期 RAM 密钥换取一次上传用的 STS 临时凭证（AssumeRole）。
+
+    SDK 懒加载，未安装时只有在真正调用该接口才会报错（与 qiniu_token 一致）。
+    """
+    from aliyunsdkcore.client import AcsClient
+    from aliyunsdksts.request.v20150401 import AssumeRoleRequest
+    client = AcsClient(settings.ALIYUN_OSS_ACCESS_KEY_ID,
+                       settings.ALIYUN_OSS_ACCESS_KEY_SECRET,
+                       settings.ALIYUN_OSS_REGION)
+    req = AssumeRoleRequest.AssumeRoleRequest()
+    req.set_accept_format("json")
+    req.set_RoleArn(settings.ALIYUN_OSS_STS_ROLE_ARN)
+    req.set_RoleSessionName("ylb-upload-" + uuid.uuid4().hex[:12])
+    req.set_DurationSeconds(settings.ALIYUN_OSS_STS_EXPIRE)
+    req.set_Policy(json.dumps(session_policy))
+    return json.loads(client.do_action_with_exception(req).decode("utf-8"))
+
+
+@api.post("/oss/token", auth=auth)
+def oss_token(request):
+    data = body(request)
+    if not oss_configured():
+        return response(failure("阿里云OSS服务未配置"))
+    biz = data.get("biz", "")
+    if biz not in OSS_BIZ_RULES:
+        return response(failure("未知的业务类型"))
+    biz_name, max_bytes, allowed_types = OSS_BIZ_RULES[biz]
+    try:
+        file_size = int(data.get("fileSize") or 0)
+    except (TypeError, ValueError):
+        return response(failure("fileSize不合法"))
+    if file_size <= 0 or file_size > max_bytes:
+        return response(failure(f"{biz_name}大小不能超过{max_bytes // (1024 * 1024)}MB"))
+    content_type = str(data.get("contentType") or "")
+    if content_type not in allowed_types:
+        return response(failure("不支持的文件类型"))
+    # Key 由后端生成：{biz}/{YYYYMMDD}/{uuid4}{ext}，全局唯一避免互相覆盖。
+    filename = str(data.get("filename") or "")
+    dot = filename.rfind(".")
+    ext = ""
+    if dot >= 0:
+        candidate = filename[dot:].lower()
+        if 1 <= len(candidate) <= 9 and candidate[1:].isalnum():
+            ext = candidate
+    today = datetime.now().strftime("%Y%m%d")
+    prefix = f"{biz}/{today}/"
+    key = f"{prefix}{uuid.uuid4().hex}{ext}"
+    # STS 会话策略收敛到本次上传的目录前缀，只给上传相关动作。
+    session_policy = {"Version": "1", "Statement": [{
+        "Effect": "Allow", "Action": OSS_STS_ACTIONS,
+        "Resource": [f"acs:oss:*:*:{settings.ALIYUN_OSS_BUCKET}/{prefix}*"],
+    }]}
+    try:
+        creds = _assume_oss_role(session_policy)["Credentials"]
+    except Exception:
+        write_log(request.auth, 5, "发放OSS上传凭证失败")
+        return response(failure("获取上传凭证失败，请稍后重试"))
+    host = settings.ALIYUN_OSS_HOST or f"https://{settings.ALIYUN_OSS_BUCKET}.{settings.ALIYUN_OSS_ENDPOINT}"
+    return response(success("", {
+        "accessKeyId": creds["AccessKeyId"],
+        "accessKeySecret": creds["AccessKeySecret"],
+        "securityToken": creds["SecurityToken"],
+        "expiration": creds["Expiration"],
+        "region": settings.ALIYUN_OSS_REGION,
+        "bucket": settings.ALIYUN_OSS_BUCKET,
+        "endpoint": settings.ALIYUN_OSS_ENDPOINT,
+        "host": host,
+        "key": key,
+    }))
+
+
+# --- Deployment health probe -------------------------------------------------
+#
+# Consumed by the automated deployment pipeline (see
+# .github/workflows/deploy.yml). The route is unauthenticated, so its body must
+# stay a fixed string and never echo configuration back to the caller.
+
+logger = logging.getLogger(__name__)
+
+
+def _health(request):
+    """Answer 200 only when the app serves *and* the configured database answers.
+
+    A bare liveness probe would also return 200 when ``DB_*`` in the server
+    ``.env`` has drifted, which is precisely the failure a deployment health
+    check exists to catch. Details of a failed probe go to the server log only:
+    the response body is a constant, so a driver error quoting the database
+    user or host cannot reach a public caller or a CI log.
+    """
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception:
+        logger.exception("health check: database probe failed")
+        raise HttpError(503, "database unavailable")
+    return {"status": "ok"}
+
+
+# Registered under both spellings: the pipeline calls ``/api/health`` to match
+# the trailing-slash-free convention of the other routes here, while
+# ``/api/health/`` keeps a manual ``curl`` from silently 404ing.
+api.get("/health", operation_id="health")(_health)
+api.get("/health/", operation_id="health_with_trailing_slash")(_health)

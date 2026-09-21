@@ -1,0 +1,93 @@
+name: Deploy backend
+
+# 生产部署只由 master 的 push 触发。本仓库的默认分支是 master，远程不存在
+# main 分支（`git ls-remote` 实测）。若要改用 main，需先把 main 建出来并把
+# 服务器工作区一并切过去，不能只改这里。
+on:
+  push:
+    branches:
+      - master
+
+# 同一时间只允许一个生产部署在跑。cancel-in-progress 必须为 false：中途取消
+# 会把服务器留在"代码已 reset 但服务尚未重启"的中间状态。
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          # 私钥只写进 runner 的临时家目录，任务结束随 runner 一起销毁。这里刻意
+          # 不 echo、不 set -x，避免它出现在公开可读的 Actions 日志里。
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SERVER_PORT" -H "$SERVER_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Run remote deploy script
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          set -euo pipefail
+          echo "Connecting to ${SERVER_HOST}:${SERVER_PORT} ..."
+          # 脚本经 stdin 送到服务器上的临时文件再执行，这样：
+          #   1) 跑的一定是本次要发布的这一份 deploy.sh，而不是上次留下的旧版；
+          #   2) 落在 /tmp 而非仓库目录内，脚本里的 git reset --hard 覆盖不到它；
+          #   3) 不用 `bash -s`，避免 git / pip 之类读取 stdin 时把脚本剩余部分吞掉。
+          ssh -i ~/.ssh/deploy_key \
+              -p "$SERVER_PORT" \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              "$SERVER_USER@$SERVER_HOST" \
+              'cat > /tmp/ylb-deploy.sh && bash /tmp/ylb-deploy.sh' \
+              < deploy/deploy.sh
+
+      - name: Public health check
+        env:
+          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          echo "Running public health check on ${HEALTHCHECK_URL} ..."
+          # deploy.sh 只验证了服务器本机的 127.0.0.1:8000。这一步再完整走一遍公网
+          # 链路（安全组 -> Nginx -> gunicorn -> 数据库），才算证明用户真的能用。
+          # /api/health 会真实探测数据库：503 表示库不可达，同样算部署失败。
+          for attempt in $(seq 1 6); do
+            code=$(curl -s -o /tmp/health_body -w '%{http_code}' --max-time 10 "$HEALTHCHECK_URL" || echo 000)
+            echo "  attempt ${attempt} -> HTTP ${code}"
+            if [ "$code" = "200" ]; then
+              echo "健康检查通过：$(cat /tmp/health_body)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "健康检查失败：${HEALTHCHECK_URL} 未返回 200。" >&2
+          echo "最后一次响应体：" >&2
+          cat /tmp/health_body >&2 || true
+          exit 1
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

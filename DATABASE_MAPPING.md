@@ -30,7 +30,7 @@
 | `ticket_subscribe` | `TicketSubscribe` | duplicate `(ticket_id,card)` service rule |
 | `students`, `statistics` | `Student`, `Statistics` | models referenced by source but no migrations supplied |
 
-## PostgreSQL 9.6 and GaussDB risks
+## PostgreSQL 9.2.4 and GaussDB risks
 
 1. JSON/JSONB support and indexes vary by GaussDB edition/mode; validate every JSON field with the vendor driver.
 2. Synchronize bigint sequences after importing Laravel IDs using vendor-approved SQL; never reset production sequences without a backup.

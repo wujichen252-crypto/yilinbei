@@ -23,4 +23,4 @@ python -m compileall -q .
 - PostgreSQL integration was not passed: local connection failed with `fe_sendauth: no password supplied`; no production database was changed.
 - GaussDB compatibility and Laravel golden-file comparisons were not run because no target server/driver/fixture was supplied.
 
-Export layouts, Qiniu uploads, SMTP, Celery/Redis, real PostgreSQL 9.6 behavior and large-file limits remain environment tests.
+Export layouts, Qiniu uploads, SMTP, Celery/Redis, real PostgreSQL 9.2.4 behavior and large-file limits remain environment tests.

@@ -2,7 +2,8 @@
 CLAUDE-*.md
 
 # Local secrets & environment
-.env
+.env*
+!.env.example
 
 # Local database / build artifacts
 db.sqlite3

@@ -36,6 +36,21 @@
       }
     },
     "/api/user": {
+      "get": {
+        "operationId": "apps_api_views_user_info",
+        "summary": "User Info",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
       "put": {
         "operationId": "apps_api_views_user_update",
         "summary": "User Update",
@@ -1505,6 +1520,23 @@
             "description": "OK"
           }
         }
+      }
+    },
+    "/api/oss/token": {
+      "post": {
+        "operationId": "apps_api_views_oss_token",
+        "summary": "Oss Token",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
       }
     }
   },
