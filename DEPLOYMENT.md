@@ -1,6 +1,6 @@
 # Deployment
 
-## Local PostgreSQL 9.6
+## Local PostgreSQL 9.2.4
 
 ```powershell
 cd django_backend
@@ -48,9 +48,42 @@ Phones on the LAN reach the dev server by IP, whose origin is
 `http://<dev-ip>:8080` — whitelist those with `CORS_ALLOWED_ORIGIN_REGEXES`
 (see `.env.example`) rather than enumerating IPs.
 
+Public deployments (API on a public IP, frontend served through a natappfree
+tunnel) additionally need the server IP and the tunnel origin accepted. Free
+natapp tunnels get a random subdomain on every restart, so whitelist the
+suffix — a leading dot in `ALLOWED_HOSTS`, a full-match regex in
+`CORS_ALLOWED_ORIGIN_REGEXES` — instead of the current subdomain:
+
+```
+ALLOWED_HOSTS=localhost,127.0.0.1,47.108.29.34,.natappfree.cc
+CORS_ALLOWED_ORIGINS=http://localhost:8080,http://localhost:5173,http://47.108.29.34
+CORS_ALLOWED_ORIGIN_REGEXES=^http://[a-z0-9-]+\.natappfree\.cc$
+CSRF_TRUSTED_ORIGINS=http://localhost:8080,http://localhost:5173,http://wa9b8afb.natappfree.cc
+```
+
+`CSRF_TRUSTED_ORIGINS` has no regex support, so update its tunnel entry
+manually when the subdomain changes. Restart the process, then verify
+preflight and the actual GET from the frontend's origin:
+
+```bash
+curl -s -o /dev/null -D - -X OPTIONS http://47.108.29.34/api/school/index/total \
+  -H "Origin: http://wa9b8afb.natappfree.cc" \
+  -H "Access-Control-Request-Method: GET" | grep -i access-control
+curl -s -o /dev/null -D - http://47.108.29.34/api/school/index/total \
+  -H "Origin: http://wa9b8afb.natappfree.cc" | grep -iE "HTTP/|access-control"
+```
+
+A GET that returns `400` without any CORS header means `ALLOWED_HOSTS` is
+still rejecting the `Host` header — fix that first; corsheaders never
+overrides a 400, so the browser will report it as a bare "CORS error".
+
 Never set `CORS_ALLOW_ALL_ORIGINS=True`: the `/api/ticket/*` endpoints are
 unauthenticated and return subscribers' ID numbers and phone numbers, so any
-website would be able to read them.
+website would be able to read them. (`CORS_ALLOW_ALL_ORIGINS` is also not
+wired to an env var in `settings.py`, so a value in `.env` would silently
+do nothing.) The same applies to `ALLOWED_HOSTS=*`: host-header validation
+is a real defense, and the dot-suffix form above covers every tunnel
+subdomain without opening the API to arbitrary hosts.
 
 ## Production
 
