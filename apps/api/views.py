@@ -30,12 +30,14 @@ from apps.core.services import (attach_report_people, failure, list_page,
 
 from .auth import BearerAuth
 from .export_services import (
+    _cjk_pdf_font,
     admin_data1_response,
     admin_data2_response,
     draw_all_response,
     draw_response,
     reports_export_response,
 )
+from .registration_form import registration_form_response
 
 api = NinjaAPI(title="YLB Government Program API", version="1.0.0",
                description="Laravel 7 compatibility API migrated to Django Ninja")
@@ -208,19 +210,6 @@ def xlsx_response(rows, filename):
     return result
 
 
-def _cjk_pdf_font():
-    """Reportlab's built-in Adobe CJK face; no external font file required.
-
-    Non-embedded (viewer supplies the glyphs); registration is idempotent.
-    """
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-    name = "STSong-Light"
-    if name not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(UnicodeCIDFont(name))
-    return name
-
-
 def pdf_response(rows, filename):
     try:
         from reportlab.lib.pagesizes import A4
@@ -371,25 +360,10 @@ def scan_files(request):
 
 @api.get("/export/report", auth=auth)
 def export_report(request):
-    rows = [["参展学校", "领队姓名", "联系电话", "乐团类型", "参展组别", "指定曲目", "自选曲目", "参展人数", "正式队员", "预备队员", "备注"]]
-    for item in Report.objects.filter(user_id=request.auth.id, status__gte=0).order_by("id"):
-        links = list(ReportPerson.objects.filter(report_id=item.id))
-        people = {p.id: p for p in Person.objects.filter(id__in=[x.person_id for x in links if x.person_id])}
-        formal = [people[x.person_id] for x in links if x.position == 0 and x.person_id in people]
-        reserve = [people[x.person_id] for x in links if x.position == 1 and x.person_id in people]
-        teachers = [people[x.person_id] for x in links if x.position == 4 and x.person_id in people]
-        conductors = [people[x.person_id] for x in links if x.position == 2 and x.person_id in people]
-        instruments = {}
-        for person in formal:
-            instruments.setdefault(person.instrument or "其他", []).append(person.name)
-        formal_text = "；".join(f"{instrument}：{'、'.join(names)}" for instrument, names in instruments.items())
-        rows.append([
-            item.school_name or "", item.contact_name or "", item.contact_phone or "", item.establishment or "",
-            item.group or "", item.name1 or "", item.name or "", len(formal) + len(reserve), formal_text,
-            "、".join(x.name for x in reserve), item.remark or "",
-        ])
-    write_log(request.auth, 6, "导出节目报送表")
-    return pdf_response(rows, "节目报送表.pdf")
+    """按组委会《附件2》式样导出报名信息表，每张报名表一页。"""
+    reports = list(Report.objects.filter(user_id=request.auth.id, status__gte=0).order_by("id"))
+    write_log(request.auth, 6, "导出报名信息表")
+    return registration_form_response(reports, "报名信息表.pdf")
 
 
 @api.get("/export/person", auth=auth)

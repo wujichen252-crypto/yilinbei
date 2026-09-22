@@ -179,6 +179,7 @@
             "description": "OK"
           }
         },
+        "description": "按组委会《附件2》式样导出报名信息表，每张报名表一页。",
         "security": [
           {
             "BearerAuth": []

@@ -18,6 +18,19 @@ from django.http import HttpResponse
 from apps.core.models import Draw, Files, Person, Report, ReportPerson, User
 
 
+def _cjk_pdf_font():
+    """Reportlab's built-in Adobe CJK face; no external font file required.
+
+    Non-embedded (viewer supplies the glyphs); registration is idempotent.
+    """
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    name = "STSong-Light"
+    if name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(UnicodeCIDFont(name))
+    return name
+
+
 REPORT_DATA_HEADINGS = [
     "所属单位", "乐团名称", "自选曲目名称", "指定曲目名称", "参报代码",
     "参展学校名称", "描述", "组别", "领队姓名", "领队电话", "联系地址或邮箱",
