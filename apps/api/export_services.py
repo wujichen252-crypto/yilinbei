@@ -43,14 +43,6 @@ ADMIN_DATA1_HEADINGS = [
     "乐团简介", "状态", "正式队员", "预备队员", "指挥", "指导教师",
 ]
 
-ADMIN_DATA2_HEADINGS = [
-    "序号", "报名学校", "参展学校名称", "乐团名称", "领队", "领队电话", "指挥",
-    "指挥电话", "指挥身份证", "指导老师", "指导老师电话", "指导老师身份证", "乐团类型",
-    "参演组别", "指定曲目", "自选曲目", "曲子时长", "短笛", "长笛", "单簧管",
-    "低音单簧", "中音萨克", "次中音萨", "上低音萨", "双簧管", "大管", "小号",
-    "长号", "圆号", "上低音号", "大号", "打击乐", "低音大提", "其他", "合计",
-]
-
 # The instrument columns of the data2 heading row are derived from this single
 # list.  They were once written out twice and drifted: the heading row kept
 # truncated spellings ("低音单簧", "低音大提") while the tally keys were full names.
