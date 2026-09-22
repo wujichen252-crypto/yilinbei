@@ -1,4 +1,7 @@
+from django.test import override_settings
+
 from apps.core.models import Person, Report, ReportPerson
+from apps.core.services import valid_person_head
 
 from .base import ApiTestCase
 
@@ -112,6 +115,93 @@ class ReportTransactionAndSoftDeleteTests(ApiTestCase):
         self.assertEqual(len(links), 1)
         self.assertEqual(links[0].position, 2)
         self.assertEqual(Person.objects.get(pk=links[0].person_id).card, "new-card")
+
+
+@override_settings(
+    PERSON_HEAD_ALLOWED_DOMAINS=["avatars.example.com"],
+    PERSON_HEAD_CDN_DOMAINS=[".cdn.example.com"],
+    QINIU_DOMAIN="",
+    ALIYUN_OSS_HOST="",
+    ALIYUN_OSS_BUCKET="",
+    ALIYUN_OSS_ENDPOINT="",
+)
+class PersonHeadAndIdentityTests(ApiTestCase):
+    def setUp(self):
+        self.school = self.create_user("head-school", 0)
+        self.other_school = self.create_user("other-school", 0)
+        self.admin = self.create_user("head-admin", 3)
+        self.authorize_as(self.school)
+
+    def report_payload(self, **overrides):
+        payload = {
+            "choir_name": "头像测试团队",
+            "name": "头像测试节目",
+            "group": "大学组",
+            "establishment": "管乐团",
+            "contact_name": "联系人",
+            "contact_phone": "13800000000",
+            "time_length": 120,
+            "person": [],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_head_validator_accepts_empty_and_configured_oss_cdn_urls(self):
+        for value in (None, "", "   ", "http://avatars.example.com/a.png",
+                      "https://avatars.example.com:8443/a.png",
+                      "https://nested.cdn.example.com/a.png"):
+            with self.subTest(value=value):
+                self.assertTrue(valid_person_head(value))
+
+    def test_head_validator_rejects_unconfigured_or_non_http_urls(self):
+        for value in ("ftp://avatars.example.com/a.png", "https://example.com/a.png",
+                      "/relative/avatar.png", "https:///missing-host.png", 123):
+            with self.subTest(value=value):
+                self.assertFalse(valid_person_head(value))
+
+    def test_report_create_rejects_invalid_head_without_creating_records(self):
+        result = self.json_request("post", "/api/school/report/create", self.report_payload(
+            person=[{"name": "成员", "card": "invalid-head-card", "head": "https://example.com/a.png"}]
+        ))
+
+        self.assertEqual(result.json()["code"], 1)
+        self.assertFalse(Report.objects.exists())
+        self.assertFalse(Person.objects.filter(card="invalid-head-card").exists())
+
+    def test_reused_card_keeps_original_identity_but_refreshes_optional_fields(self):
+        person = Person.objects.create(
+            name="身份证本人", card="reused-card", user_id=self.other_school.id,
+            phone="old-phone",
+        )
+        result = self.json_request("post", "/api/school/report/create", self.report_payload(
+            person=[{
+                "name": "身份证本人", "card": "reused-card", "user_id": self.school.id,
+                "phone": "new-phone", "head": "https://avatars.example.com/a.png",
+                "position": 0, "type": 0,
+            }]
+        ))
+
+        self.assertEqual(result.json()["code"], 0)
+        person.refresh_from_db()
+        self.assertEqual(person.name, "身份证本人")
+        self.assertEqual(person.user_id, self.other_school.id)
+        self.assertEqual(person.phone, "new-phone")
+        self.assertEqual(person.head, "https://avatars.example.com/a.png")
+
+    def test_admin_person_update_rejects_invalid_head(self):
+        person = Person.objects.create(
+            name="管理员测试成员", card="admin-head-card", user_id=self.school.id,
+            head="https://avatars.example.com/original.png",
+        )
+        self.authorize_as(self.admin)
+
+        result = self.json_request("put", "/api/admin/person", {
+            "id": person.id, "head": "https://example.com/not-allowed.png",
+        })
+
+        self.assertEqual(result.json()["code"], 1)
+        person.refresh_from_db()
+        self.assertEqual(person.head, "https://avatars.example.com/original.png")
 
 
 class AdminCommitteeReportExtensionTests(ApiTestCase):

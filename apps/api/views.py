@@ -25,8 +25,8 @@ from apps.core.models import (Crew, Draw, Files, Leader, LiveReport, Logs,
 from apps.core.services import (attach_report_people, failure, list_page,
                                 live_report_dict, model_dict, new_code,
                                 parse_body, report_dict, store_people,
-                                success, user_dict, verify_user_password,
-                                write_log)
+                                success, user_dict, valid_person_head,
+                                verify_user_password, write_log)
 
 from .auth import BearerAuth
 from .export_services import (
@@ -573,6 +573,8 @@ def admin_person_update(request):
     if err: return err
     data = body(request); obj = Person.objects.filter(pk=data.get("id")).first()
     if not obj: return response(failure("人员不存在"))
+    if "head" in data and not valid_person_head(data["head"]):
+        return response(failure("头像地址必须为空，且只能使用已配置 OSS/CDN 域名的 http/https 地址"))
     for k, v in data.items():
         if k in {f.name for f in Person._meta.fields} and k not in {"id", "created_at", "updated_at"}: setattr(obj, k, v)
     obj.save(); return response(success())
