@@ -13,15 +13,26 @@ from datetime import datetime
 
 from django.conf import settings
 from django.db import connection, transaction
-from django.db.models import Q
+from django.db.models import F, Q
+from django.core.exceptions import ValidationError
 from django.http import HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from ninja import NinjaAPI
 from ninja.errors import HttpError
 
 from apps.core.models import (Crew, Draw, Files, Leader, LiveReport, Logs,
-                              Person, Recommend, Report, ReportPerson,
-                              ScanFiles, Ticket, TicketSubscribe, User)
+                              Person, PersonalAccessToken, Report, ReportDraft,
+                              ReportPerson, Recommend, ScanFiles, Ticket,
+                              TicketSubscribe, User)
+from apps.core.report_drafts import (
+    DraftError, DraftIntegrityError, DraftNotFound, DraftConflict,
+    ReportNotRejected,
+    SubmissionError, build_payload_from_report, create_or_get_draft,
+    create_report_from_submission, decode_payload, draft_summary,
+    encode_payload, normalize_draft_payload, parse_submission_payload,
+    update_draft, update_rejected_report_from_submission,
+)
 from apps.core.services import (attach_report_people, failure, list_page,
                                 live_report_dict, model_dict, new_code,
                                 parse_body, report_dict, store_people,
@@ -732,6 +743,158 @@ def province_percent(request):
     return err or response(success("获取成功！", {"data": []}))
 
 
+def _draft_error_response(error):
+    field = getattr(error, "field", None)
+    data = {"code": getattr(error, "code", "INVALID_DRAFT_PAYLOAD"),
+            "errors": [{"field": field, "message": str(error)}] if field else []}
+    return response({"code": data["code"], "msg": str(error), "data": data},
+                    getattr(error, "status", 400))
+
+
+def _draft_payload_body(request):
+    data = body(request)
+    return data.get("payload", data)
+
+
+def register_draft_routes(prefix, expected, scope):
+    tag = prefix.strip("/").replace("/", "_")
+
+    @api.post(prefix + "/report/drafts", auth=auth, operation_id=tag + "_draft_create")
+    def _draft_create(request):
+        err = role_error(request, expected)
+        if err:
+            return err
+        try:
+            draft = create_or_get_draft(request.auth, scope, _draft_payload_body(request))
+            return response(success("暂存成功", draft_summary(draft)))
+        except DraftError as exc:
+            return _draft_error_response(exc)
+
+    @api.put(prefix + "/report/drafts/{draft_id}", auth=auth, operation_id=tag + "_draft_update")
+    def _draft_update(request, draft_id: int):
+        err = role_error(request, expected)
+        if err:
+            return err
+        data = body(request)
+        try:
+            version = data.get("version")
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+                raise DraftError("version 必须是正整数")
+            draft = update_draft(request.auth, scope, draft_id, version, data.get("payload"))
+            return response(success("暂存成功", draft_summary(draft)))
+        except DraftError as exc:
+            return _draft_error_response(exc)
+
+    @api.get(prefix + "/report/drafts", auth=auth, operation_id=tag + "_draft_list")
+    def _draft_list(request):
+        err = role_error(request, expected)
+        if err:
+            return err
+        drafts = ReportDraft.objects.filter(
+            user_id=request.auth.id, scope=scope,
+            state=ReportDraft.STATE_EDITING).order_by("-updated_at")
+        return response(success("获取成功", {
+            "data": [draft_summary(item) for item in drafts], "count": drafts.count()
+        }))
+
+    @api.get(prefix + "/report/drafts/{draft_id}", auth=auth, operation_id=tag + "_draft_get")
+    def _draft_get(request, draft_id: int):
+        err = role_error(request, expected)
+        if err:
+            return err
+        draft = ReportDraft.objects.filter(id=draft_id, user_id=request.auth.id, scope=scope).first()
+        if not draft:
+            return _draft_error_response(DraftNotFound("草稿不存在"))
+        try:
+            data = draft_summary(draft)
+            data["payload"] = decode_payload(draft.payload)
+            return response(success("获取成功", data))
+        except DraftError as exc:
+            return _draft_error_response(exc)
+
+    @api.post(prefix + "/report/drafts/{draft_id}/submit", auth=auth, operation_id=tag + "_draft_submit")
+    def _draft_submit(request, draft_id: int):
+        err = role_error(request, expected)
+        if err:
+            return err
+        data = body(request)
+        try:
+            version = data.get("version")
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+                raise DraftError("version 必须是正整数")
+            with transaction.atomic():
+                draft = ReportDraft.objects.select_for_update().filter(
+                    id=draft_id, user_id=request.auth.id, scope=scope).first()
+                if not draft:
+                    raise DraftNotFound("草稿不存在")
+                if draft.state == ReportDraft.STATE_SUBMITTED:
+                    if draft.report_id is None:
+                        raise DraftIntegrityError("已提交草稿缺少 report_id")
+                    return response(success("提交成功", {
+                        **draft_summary(draft), "report_id": str(draft.report_id)
+                    }))
+                if draft.version != version:
+                    raise DraftConflict("草稿已在其他页面更新", {"server_version": draft.version})
+                submission = parse_submission_payload(decode_payload(draft.payload), request.auth.id, scope)
+                if draft.report_id is None:
+                    report = create_report_from_submission(user=request.auth, submission=submission,
+                                                           scope=scope)
+                else:
+                    report = Report.objects.select_for_update().filter(
+                        pk=draft.report_id, user_id=request.auth.id).first()
+                    if not report:
+                        raise DraftNotFound("关联报名不存在")
+                    report = update_rejected_report_from_submission(
+                        user=request.auth, report=report, scope=scope, submission=submission)
+                draft.report_id = report.id
+                draft.state = ReportDraft.STATE_SUBMITTED
+                draft.submitted_at = timezone.now()
+                draft.updated_at = timezone.now()
+                draft.save(update_fields=["report_id", "state", "submitted_at", "updated_at"])
+                return response(success("提交成功", {
+                    **draft_summary(draft), "report_id": str(report.id),
+                    "report_status": report.status,
+                }))
+        except DraftError as exc:
+            return _draft_error_response(exc)
+        except (ValueError, ValidationError) as exc:
+            return _draft_error_response(SubmissionError(str(exc)))
+
+    @api.post(prefix + "/reports/{report_id}/edit-draft", auth=auth,
+              operation_id=tag + "_report_edit_draft")
+    def _edit_draft(request, report_id: int):
+        err = role_error(request, expected)
+        if err:
+            return err
+        try:
+            with transaction.atomic():
+                report = Report.objects.select_for_update().filter(
+                    pk=report_id, user_id=request.auth.id).first()
+                if not report:
+                    raise DraftNotFound("报名不存在")
+                if report.status != -1:
+                    raise ReportNotRejected("当前报名不是驳回状态")
+                draft = ReportDraft.objects.select_for_update().filter(
+                    report_id=report.id, user_id=request.auth.id, scope=scope).first()
+                payload = encode_payload(build_payload_from_report(report))
+                if draft is None:
+                    draft = ReportDraft.objects.create(
+                        user_id=request.auth.id, scope=scope, report_id=report.id,
+                        payload=payload, state=ReportDraft.STATE_EDITING)
+                else:
+                    draft.payload = payload
+                    draft.state = ReportDraft.STATE_EDITING
+                    draft.version = F("version") + 1
+                    draft.updated_at = timezone.now()
+                    draft.save(update_fields=["payload", "state", "version", "updated_at"])
+                    draft.refresh_from_db()
+                data = draft_summary(draft)
+                data["payload"] = decode_payload(draft.payload)
+                return response(success("进入编辑成功", data))
+        except DraftError as exc:
+            return _draft_error_response(exc)
+
+
 def register_scope_routes(prefix, expected, province=False):
     tag = prefix.strip("/").replace("/", "_")
     @api.get(prefix + "/report/list", auth=auth, operation_id=tag + "_report_list")
@@ -794,6 +957,8 @@ def _map_pair(prefix, value):
     return result
 
 
+register_draft_routes("/city", 1, ReportDraft.SCOPE_CITY)
+register_draft_routes("/school", 0, ReportDraft.SCOPE_SCHOOL)
 register_scope_routes("/city", 1)
 register_scope_routes("/school", 0)
 register_scope_routes("/province", 4, True)

@@ -203,6 +203,37 @@ class Report(models.Model):
         self.save(update_fields=["deleted_at"])
 
 
+class ReportDraft(models.Model):
+    """Server-owned, versioned text snapshot of an unfinished report form."""
+    STATE_EDITING = 0
+    STATE_SUBMITTED = 1
+
+    SCOPE_SCHOOL = User.TYPE_SCHOOL
+    SCOPE_CITY = User.TYPE_CITY
+
+    id = models.BigAutoField(primary_key=True)
+    user_id = models.BigIntegerField()
+    scope = models.SmallIntegerField()
+    report_id = models.BigIntegerField(null=True, blank=True)
+    payload = models.TextField()
+    schema_version = models.IntegerField(default=1)
+    version = models.IntegerField(default=1)
+    state = models.SmallIntegerField(default=STATE_EDITING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "report_draft"
+        indexes = [
+            models.Index(
+                fields=["user_id", "scope", "state", "updated_at"],
+                name="draft_user_state_idx",
+            ),
+            models.Index(fields=["report_id"], name="draft_report_idx"),
+        ]
+
+
 class Person(models.Model):
     id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=255, default=" ")
