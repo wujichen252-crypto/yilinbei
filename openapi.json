@@ -1555,6 +1555,32 @@
           }
         ]
       }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "health",
+        "summary": " Health",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Answer 200 only when the app serves *and* the configured database answers.\n\nA bare liveness probe would also return 200 when ``DB_*`` in the server\n``.env`` has drifted, which is precisely the failure a deployment health\ncheck exists to catch. Details of a failed probe go to the server log only:\nthe response body is a constant, so a driver error quoting the database\nuser or host cannot reach a public caller or a CI log."
+      }
+    },
+    "/api/health/": {
+      "get": {
+        "operationId": "health_with_trailing_slash",
+        "summary": " Health",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "Answer 200 only when the app serves *and* the configured database answers.\n\nA bare liveness probe would also return 200 when ``DB_*`` in the server\n``.env`` has drifted, which is precisely the failure a deployment health\ncheck exists to catch. Details of a failed probe go to the server log only:\nthe response body is a constant, so a driver error quoting the database\nuser or host cannot reach a public caller or a CI log."
+      }
     }
   },
   "components": {
