@@ -7,15 +7,17 @@ denials use 401/403 as the original middleware did.
 import csv
 import io
 import json
+import logging
 import uuid
 from datetime import datetime
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from ninja import NinjaAPI
+from ninja.errors import HttpError
 
 from apps.core.models import (Crew, Draw, Files, Leader, LiveReport, Logs,
                               Person, Recommend, Report, ReportPerson,
@@ -1036,3 +1038,37 @@ def oss_upload(request):
         "filename": f.name,
         "size": f.size,
     }))
+
+
+# --- Deployment health probe -------------------------------------------------
+#
+# Consumed by the automated deployment pipeline (see
+# .github/workflows/deploy.yml). The route is unauthenticated, so its body must
+# stay a fixed string and never echo configuration back to the caller.
+
+logger = logging.getLogger(__name__)
+
+
+def _health(request):
+    """Answer 200 only when the app serves *and* the configured database answers.
+
+    A bare liveness probe would also return 200 when ``DB_*`` in the server
+    ``.env`` has drifted, which is precisely the failure a deployment health
+    check exists to catch. Details of a failed probe go to the server log only:
+    the response body is a constant, so a driver error quoting the database
+    user or host cannot reach a public caller or a CI log.
+    """
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+    except Exception:
+        logger.exception("health check: database probe failed")
+        raise HttpError(503, "database unavailable")
+    return {"status": "ok"}
+
+
+# Registered under both spellings: the pipeline calls ``/api/health`` to match
+# the trailing-slash-free convention of the other routes here, while
+# ``/api/health/`` keeps a manual ``curl`` from silently 404ing.
+api.get("/health", operation_id="health")(_health)
+api.get("/health/", operation_id="health_with_trailing_slash")(_health)
