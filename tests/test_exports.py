@@ -1,4 +1,5 @@
 from apps.api.export_services import (
+    INSTRUMENTS,
     admin_data1_rows,
     admin_data2_rows,
     report_data_rows,
@@ -41,6 +42,30 @@ class ExportCompatibilityTests(ApiTestCase):
         data2 = admin_data2_rows([report])
         self.assertEqual(len(data2[0]), 35)
         self.assertEqual(data2[1][16], "2分0秒")
+
+    def test_admin_data2_headings_spell_out_full_instrument_names(self):
+        """The data2 heading row must not regress to truncated instrument names."""
+
+        headings = admin_data2_rows([self.make_report(self.school)])[0]
+
+        self.assertEqual(len(headings), 35)
+        # Columns 17..33 are the instrument totals, sitting just before "合计".
+        self.assertEqual(headings[17:34], list(INSTRUMENTS))
+
+        # The five columns that used to ship truncated; indexes are the real
+        # positions in the 35-column heading row.
+        for index, full_name in (
+            (20, "低音单簧管"),
+            (21, "中音萨克斯"),
+            (22, "次中音萨克斯"),
+            (23, "上低音萨克斯"),
+            (32, "低音大提琴"),
+        ):
+            self.assertEqual(headings[index], full_name)
+
+        # List membership is exact, so the full names above are not matches.
+        for truncated in ("低音单簧", "中音萨克", "次中音萨", "上低音萨", "低音大提"):
+            self.assertNotIn(truncated, headings)
 
 
 class PdfExportTests(ApiTestCase):
