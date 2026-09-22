@@ -129,8 +129,8 @@ def _person(item, index, complete=False):
     for field in ("school", "phone", "gender", "major", "head", "instrument", "other", "remark"):
         result[field] = _string(item.get(field), "person[%s].%s" % (index, field))
     result["age"] = _integer(item.get("age"), "person[%s].age" % index)
-    result["position"] = _integer(item.get("position"), "person[%s].position" % index, True, 0)
-    result["type"] = _integer(item.get("type"), "person[%s].type" % index, True, 0)
+    result["position"] = _integer(item.get("position"), "person[%s].position" % index, complete, 0)
+    result["type"] = _integer(item.get("type"), "person[%s].type" % index, complete, 0)
     return result
 
 
@@ -250,9 +250,12 @@ def update_draft(user, scope, draft_id, version, raw):
         state=ReportDraft.STATE_EDITING, version=version,
     ).update(payload=payload, version=F("version") + 1, updated_at=timezone.now())
     if updated != 1:
-        if not ReportDraft.objects.filter(id=draft_id, user_id=user.id, scope=scope).exists():
+        current = ReportDraft.objects.filter(id=draft_id, user_id=user.id, scope=scope).first()
+        if current is None:
             raise DraftNotFound("草稿不存在")
-        raise DraftConflict("草稿已在其他页面更新")
+        if current.state != ReportDraft.STATE_EDITING:
+            raise DraftConflict("草稿已提交，不能更新")
+        raise DraftConflict("草稿已在其他页面更新", {"server_version": current.version})
     return ReportDraft.objects.get(id=draft_id)
 
 

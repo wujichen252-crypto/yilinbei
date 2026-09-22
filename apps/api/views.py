@@ -66,7 +66,8 @@ def body(request):
 def role_error(request, expected):
     user = request.auth
     if not user or user.type != expected:
-        return response({"error": "无该页面操作权限！"}, 403)
+        return response({"code": "FORBIDDEN", "msg": "无该页面操作权限！",
+                         "data": None, "error": "无该页面操作权限！"}, 403)
     return None
 
 
@@ -745,8 +746,13 @@ def province_percent(request):
 
 def _draft_error_response(error):
     field = getattr(error, "field", None)
-    data = {"code": getattr(error, "code", "INVALID_DRAFT_PAYLOAD"),
-            "errors": [{"field": field, "message": str(error)}] if field else []}
+    details = getattr(error, "data", None)
+    data = dict(details) if isinstance(details, dict) else {}
+    data.setdefault("code", getattr(error, "code", "INVALID_DRAFT_PAYLOAD"))
+    if field:
+        data.setdefault("errors", []).append({"field": field, "message": str(error)})
+    else:
+        data.setdefault("errors", [])
     return response({"code": data["code"], "msg": str(error), "data": data},
                     getattr(error, "status", 400))
 

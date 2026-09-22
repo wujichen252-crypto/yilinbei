@@ -98,7 +98,8 @@ class RolePermissionTests(ApiTestCase):
                 other_route = routes[(user_type + 1) % len(routes)]
                 denied = self.client.get(other_route)
                 self.assertEqual(denied.status_code, 403)
-                self.assertEqual(denied.json(), {"error": "无该页面操作权限！"})
+                self.assertEqual(denied.json()["code"], "FORBIDDEN")
+                self.assertEqual(denied.json()["msg"], "无该页面操作权限！")
 
     def test_percent_dashboards_apply_the_same_role_middleware(self):
         self.authorize_as(self.users[1])
@@ -124,6 +125,8 @@ class RolePermissionTests(ApiTestCase):
             self.assertEqual(result.json()["code"], 1)
         else:
             self.assertEqual(result.status_code, 403)
+            self.assertEqual(result.json()["code"], "FORBIDDEN")
+            self.assertEqual(result.json()["msg"], "无该页面操作权限！")
 
     def test_profile_update_cannot_escalate_own_role(self):
         user = self.users[0]
@@ -160,7 +163,8 @@ class RolePermissionTests(ApiTestCase):
                     else:
                         denied = self.client.get(route)
                     self.assertEqual(denied.status_code, 403)
-                    self.assertEqual(denied.json(), {"error": "无该页面操作权限！"})
+                    self.assertEqual(denied.json()["code"], "FORBIDDEN")
+                    self.assertEqual(denied.json()["msg"], "无该页面操作权限！")
 
 
 @unittest.skipUnless(HAVE_BCRYPT, "bcrypt 未安装：pip install -r requirements.txt")

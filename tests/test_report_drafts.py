@@ -47,12 +47,12 @@ class DraftApiTests(ApiTestCase):
         value.update(overrides)
         return value
 
-    def test_create_and_update_draft_do_not_write_formal_rows(self):
-        result = self.json_request("post", "/api/school/report/drafts", {
-            "payload": self.payload(name="未完成")
-        })
+    def test_draft_allows_incomplete_person_role_fields(self):
+        payload = self.payload(person=[{"name": "暂未分类", "card": "draft-card"}])
+        result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()["code"], 0)
+        self.assertEqual(result.json()["data"]["version"], 1)
         data = result.json()["data"]
         draft = ReportDraft.objects.get(pk=int(data["draft_id"]))
         self.assertEqual(draft.version, 1)
@@ -82,6 +82,7 @@ class DraftApiTests(ApiTestCase):
             "version": 1, "payload": self.payload(name="stale")
         })
         self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["data"]["server_version"], 2)
 
         self.authorize_as(self.other_school)
         hidden = self.client.get(path)
