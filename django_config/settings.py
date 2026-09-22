@@ -98,6 +98,10 @@ SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0"))
 CORS_ALLOWED_ORIGINS = [x.strip() for x in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if x.strip()]
 CORS_ALLOWED_ORIGIN_REGEXES = [x.strip() for x in os.getenv("CORS_ALLOWED_ORIGIN_REGEXES", "").split(",") if x.strip()]
 CSRF_TRUSTED_ORIGINS = [x.strip() for x in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if x.strip()]
+# 默认白名单之外，放行前端为绕过 ngrok 免费版浏览器警告页而带的请求头
+# （前端在 axios 拦截器统一加 ngrok-skip-browser-warning: 1）。
+from corsheaders.defaults import default_headers  # noqa: E402
+CORS_ALLOW_HEADERS = list(default_headers) + ["ngrok-skip-browser-warning"]
 
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend")
 EMAIL_HOST = os.getenv("EMAIL_HOST", "")
