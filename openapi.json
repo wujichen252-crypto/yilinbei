@@ -1538,6 +1538,23 @@
           }
         ]
       }
+    },
+    "/api/oss/upload": {
+      "post": {
+        "operationId": "apps_api_views_oss_upload",
+        "summary": "Oss Upload",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
     }
   },
   "components": {

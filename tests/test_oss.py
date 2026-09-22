@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from unittest import mock
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 
 from .base import ApiTestCase
@@ -119,4 +120,82 @@ class OssTokenTests(ApiTestCase):
     def test_requires_auth(self):
         self.clear_authorization()
         result = self.json_request("post", "/api/oss/token", {})
+        self.assertEqual(result.status_code, 401)
+
+
+class FakeBucket:
+    def __init__(self):
+        self.puts = []
+
+    def put_object(self, key, data, headers=None):
+        self.puts.append((key, data, headers))
+
+
+@override_settings(**OSS_SETTINGS)
+class OssProxyUploadTests(ApiTestCase):
+    """POST /api/oss/upload（小文件后端代理上传），oss2 全程 mock。"""
+
+    def setUp(self):
+        self.user = self.create_user("devschool", 0)
+        self.authorize_as(self.user)
+        self.bucket = FakeBucket()
+
+    def post_file(self, biz="image", name="头像.png",
+                  content=b"\x89PNG\r\n\x1a\nfake", content_type="image/png"):
+        payload = {"biz": biz,
+                   "file": SimpleUploadedFile(name, content, content_type=content_type)}
+        with mock.patch("apps.api.views._oss_bucket", return_value=self.bucket):
+            return self.client.post("/api/oss/upload", payload)
+
+    def test_uploads_and_returns_url_key_pair(self):
+        result = self.post_file()
+        self.assertEqual(result.status_code, 200)
+        payload = result.json()
+        self.assertEqual(payload["code"], 0)
+        data = payload["data"]
+        self.assertEqual(set(data), {"url", "key", "filename", "size"})
+        today = datetime.now().strftime("%Y%m%d")
+        self.assertTrue(data["key"].startswith(f"image/{today}/"))
+        self.assertTrue(data["key"].endswith(".png"))
+        self.assertTrue(data["url"].startswith("https://yilinbei-oss.oss-cn-chengdu.aliyuncs.com/"))
+        self.assertTrue(data["url"].endswith(data["key"]))
+        # 服务器确实执行了 put_object，并带上浏览器声明的 MIME
+        key, content, headers = self.bucket.puts[0]
+        self.assertEqual(key, data["key"])
+        self.assertEqual(headers, {"Content-Type": "image/png"})
+
+    def test_video_biz_must_go_direct_upload(self):
+        result = self.post_file(biz="video", name="a.mp4", content_type="video/mp4")
+        self.assertEqual(result.json()["code"], 1)
+
+    def test_rejects_unknown_biz(self):
+        result = self.post_file(biz="anything")
+        self.assertEqual(result.json()["code"], 1)
+
+    def test_rejects_oversize_image(self):
+        result = self.post_file(content=b"x" * (1024 * 1024 + 1))
+        payload = result.json()
+        self.assertEqual(payload["code"], 1)
+        self.assertIn("1MB", payload["msg"])
+
+    def test_rejects_disallowed_extension(self):
+        result = self.post_file(name="evil.exe", content_type="image/png")
+        payload = result.json()
+        self.assertEqual(payload["code"], 1)
+        self.assertIn("不支持的文件类型", payload["msg"])
+
+    def test_missing_file_fails_cleanly(self):
+        result = self.client.post("/api/oss/upload", {"biz": "image"})
+        self.assertEqual(result.json()["code"], 1)
+
+    def test_requires_configuration(self):
+        with override_settings(ALIYUN_OSS_ACCESS_KEY_ID=""):
+            result = self.client.post("/api/oss/upload", {"biz": "image"})
+        payload = result.json()
+        self.assertEqual(payload["code"], 1)
+        self.assertIn("未配置", payload["msg"])
+
+    def test_requires_auth(self):
+        self.clear_authorization()
+        result = self.client.post("/api/oss/upload", {"biz": "image"})
         self.assertEqual(result.status_code, 401)

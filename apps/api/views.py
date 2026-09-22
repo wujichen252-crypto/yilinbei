@@ -896,9 +896,13 @@ def _assume_oss_role(session_policy):
     """
     from aliyunsdkcore.client import AcsClient
     from aliyunsdksts.request.v20150401 import AssumeRoleRequest
+    # STS 服务端点按 region id（cn-chengdu）拼，去掉 SDK 风格的 oss- 前缀
+    region_id = settings.ALIYUN_OSS_REGION
+    if region_id.startswith("oss-"):
+        region_id = region_id[len("oss-"):]
     client = AcsClient(settings.ALIYUN_OSS_ACCESS_KEY_ID,
                        settings.ALIYUN_OSS_ACCESS_KEY_SECRET,
-                       settings.ALIYUN_OSS_REGION)
+                       region_id)
     req = AssumeRoleRequest.AssumeRoleRequest()
     req.set_accept_format("json")
     req.set_RoleArn(settings.ALIYUN_OSS_STS_ROLE_ARN)
@@ -906,6 +910,15 @@ def _assume_oss_role(session_policy):
     req.set_DurationSeconds(settings.ALIYUN_OSS_STS_EXPIRE)
     req.set_Policy(json.dumps(session_policy))
     return json.loads(client.do_action_with_exception(req).decode("utf-8"))
+
+
+def oss_public_host():
+    """对外访问域名：优先 ALIYUN_OSS_HOST，否则按 bucket+endpoint 推导（容忍带协议的 endpoint）。"""
+    endpoint = settings.ALIYUN_OSS_ENDPOINT
+    for scheme in ("https://", "http://"):
+        if endpoint.startswith(scheme):
+            endpoint = endpoint[len(scheme):]
+    return settings.ALIYUN_OSS_HOST or f"https://{settings.ALIYUN_OSS_BUCKET}.{endpoint}"
 
 
 @api.post("/oss/token", auth=auth)
@@ -947,7 +960,7 @@ def oss_token(request):
     except Exception:
         write_log(request.auth, 5, "发放OSS上传凭证失败")
         return response(failure("获取上传凭证失败，请稍后重试"))
-    host = settings.ALIYUN_OSS_HOST or f"https://{settings.ALIYUN_OSS_BUCKET}.{settings.ALIYUN_OSS_ENDPOINT}"
+    host = oss_public_host()
     return response(success("", {
         "accessKeyId": creds["AccessKeyId"],
         "accessKeySecret": creds["AccessKeySecret"],
@@ -958,4 +971,68 @@ def oss_token(request):
         "endpoint": settings.ALIYUN_OSS_ENDPOINT,
         "host": host,
         "key": key,
+    }))
+
+
+# --- 小文件后端代理上传：前端 multipart 交文件，服务器校验后直传 OSS ---
+# 大文件/视频不走这里：700MB 级别必须由前端持 STS 凭证直传（POST /api/oss/token）。
+OSS_EXT_RULES = {
+    # 代理上传按扩展名校验：浏览器对 tiff 等类型常给出空 MIME，不可靠
+    "image": {".jpg", ".jpeg", ".png"},
+    "photo": {".jpg", ".jpeg", ".tif", ".tiff"},
+    "spectrum": {".pdf"},
+    "doc": {".pdf"},
+}
+
+
+def oss_proxy_ready():
+    return bool(settings.ALIYUN_OSS_ACCESS_KEY_ID
+                and settings.ALIYUN_OSS_ACCESS_KEY_SECRET
+                and settings.ALIYUN_OSS_BUCKET)
+
+
+def _oss_bucket():
+    from oss2 import Auth, Bucket
+    auth = Auth(settings.ALIYUN_OSS_ACCESS_KEY_ID, settings.ALIYUN_OSS_ACCESS_KEY_SECRET)
+    return Bucket(auth, settings.ALIYUN_OSS_ENDPOINT, settings.ALIYUN_OSS_BUCKET)
+
+
+@api.post("/oss/upload", auth=auth)
+def oss_upload(request):
+    if not oss_proxy_ready():
+        return response(failure("阿里云OSS服务未配置"))
+    biz = request.POST.get("biz", "")
+    if biz not in OSS_BIZ_RULES:
+        return response(failure("未知的业务类型"))
+    if biz == "video":
+        return response(failure("视频请使用前端直传：POST /api/oss/token"))
+    f = request.FILES.get("file")
+    if not f:
+        return response(failure("缺少文件"))
+    biz_name, max_bytes, allowed_types = OSS_BIZ_RULES[biz]
+    if f.size > max_bytes:
+        return response(failure(f"{biz_name}大小不能超过{max_bytes // (1024 * 1024)}MB"))
+    dot = f.name.rfind(".")
+    ext = f.name[dot:].lower() if dot >= 0 else ""
+    if ext not in OSS_EXT_RULES[biz]:
+        return response(failure("不支持的文件类型"))
+    # key 生成规则与 /api/oss/token 一致：{biz}/{YYYYMMDD}/{uuid4}{ext}
+    today = datetime.now().strftime("%Y%m%d")
+    prefix = f"{biz}/{today}/"
+    key = f"{prefix}{uuid.uuid4().hex}{ext}"
+    headers = {"Content-Type": f.content_type} if f.content_type in allowed_types else None
+    try:
+        bucket = _oss_bucket()
+        if headers:
+            bucket.put_object(key, f, headers=headers)
+        else:
+            bucket.put_object(key, f)
+    except Exception:
+        write_log(request.auth, 5, "OSS代理上传失败")
+        return response(failure("上传失败，请稍后重试"))
+    return response(success("", {
+        "url": f"{oss_public_host()}/{key}",
+        "key": key,
+        "filename": f.name,
+        "size": f.size,
     }))
