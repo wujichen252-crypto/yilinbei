@@ -181,9 +181,10 @@ def _meal_cells(report):
 
 def _checkline(options, value):
     """乐团类别 / 参展组别：命中项打 ■，其余保持 □（GB2312 字体内可用）。"""
-    value = str(value or "")
+    value = str(value or "").strip()
+    # 必须整项相等："管乐团"是"铜管乐团"的子串，用 in 会把两者同时勾上
     return "　　".join(
-        f"{option}■" if option in value else f"{option}□"
+        f"{option}■" if option == value else f"{option}□"
         for option in options
     )
 

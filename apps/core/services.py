@@ -5,7 +5,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import (Files, Leader, Logs, Person, PersonalAccessToken,
@@ -201,6 +201,41 @@ def attach_report_people(report_id, result):
             values["person_id"] = values.pop("id")
         links.append(ReportPerson(report_id=report_id, **values))
     ReportPerson.objects.bulk_create(links)
+
+
+# Violations of the report_person conductor/instructor rule (migration 0007:
+# partial unique index + trigger) surface as IntegrityError. Match the known
+# trigger/index diagnostics and translate them into API-facing messages; the
+# None return tells callers the error is unrelated and must be re-raised.
+# GaussDB/PostgreSQL deferred triggers raise at COMMIT, so callers must catch
+# outside their transaction.atomic() block.
+_RULE_MESSAGE_HINTS = (
+    ("指挥只能有 1 人", "每张报名表只能有 1 名指挥"),
+    ("指导老师最多 1 人", "指挥是教师时，指导老师最多 1 人"),
+    ("指导老师最多 2 人", "指挥是学生时，指导老师最多 2 人"),
+    ("只能由教师担任指挥", "中小学组别只能由教师担任指挥"),
+)
+_RULE_CONSTRAINT_HINTS = (
+    "report_person_one_conductor_idx",
+    "UNIQUE constraint failed: report_person.report_id",
+)
+
+
+def report_rule_message(exc):
+    """Friendly message for a conductor/instructor rule IntegrityError, else None."""
+    cause = getattr(exc, "__cause__", None) or exc
+    texts = [str(cause), str(exc)]
+    diag = getattr(cause, "diag", None)
+    for attr in ("message_primary", "constraint_name"):
+        value = getattr(diag, attr, None)
+        if value:
+            texts.append(str(value))
+    for marker, message in _RULE_MESSAGE_HINTS:
+        if any(marker in text for text in texts):
+            return message
+    if any(hint in text for hint in _RULE_CONSTRAINT_HINTS for text in texts):
+        return "每张报名表只能有 1 名指挥"
+    return None
 
 
 def report_dict(report, include_children=True):

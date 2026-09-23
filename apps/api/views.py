@@ -37,9 +37,9 @@ from apps.core.report_drafts import (
 from apps.core.services import (BodyError, attach_report_people, failure,
                                 list_page, live_report_dict, model_dict,
                                 new_code, parse_body, report_dict,
-                                store_people, success, user_dict,
-                                valid_person_head, verify_user_password,
-                                write_log)
+                                report_rule_message, store_people, success,
+                                user_dict, valid_person_head,
+                                verify_user_password, write_log)
 
 from .auth import BearerAuth
 from .export_services import (
@@ -120,30 +120,38 @@ def create_report(request, province=False):
     data = body(request)
     scope = 4 if province else user.type
     people = data.get("person", [])
-    with transaction.atomic():
-        lock_user_slot(user.id)
-        try:
-            # 按组别计配额（每校每个组别一支）：小学组、中学组可各报一支。
-            # 见 assert_report_quota 与 HaveToRead.vue 的【2026-09-23 口径变更】。
-            assert_report_quota(user, scope, data.get("group"))
-        except ReportQuotaExceeded as exc:
-            transaction.set_rollback(True)
-            return response(failure(exc.message))
-        ok, stored = store_people(user, people)
-        if not ok:
-            transaction.set_rollback(True)
-            return response(failure(stored))
-        values = {f.name for f in Report._meta.fields}
-        values -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
-        payload = {k: v for k, v in data.items() if k in values}
-        for key in ("read", "minute", "second", "fileList", "person"):
-            payload.pop(key, None)
-        if not province:
-            payload["dinner_reservation"] = data.get("dinner_reservation") or []
-        else:
-            payload.pop("dinner_reservation", None)
-        report = Report.objects.create(user_id=user.id, **payload)
-        attach_report_people(report.id, stored)
+    try:
+        with transaction.atomic():
+            lock_user_slot(user.id)
+            try:
+                # 按组别计配额（每校每个组别一支）：小学组、中学组可各报一支。
+                # 见 assert_report_quota 与 HaveToRead.vue 的【2026-09-23 口径变更】。
+                assert_report_quota(user, scope, data.get("group"))
+            except ReportQuotaExceeded as exc:
+                transaction.set_rollback(True)
+                return response(failure(exc.message))
+            ok, stored = store_people(user, people)
+            if not ok:
+                transaction.set_rollback(True)
+                return response(failure(stored))
+            values = {f.name for f in Report._meta.fields}
+            values -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
+            payload = {k: v for k, v in data.items() if k in values}
+            for key in ("read", "minute", "second", "fileList", "person"):
+                payload.pop(key, None)
+            if not province:
+                payload["dinner_reservation"] = data.get("dinner_reservation") or []
+            else:
+                payload.pop("dinner_reservation", None)
+            report = Report.objects.create(user_id=user.id, **payload)
+            attach_report_people(report.id, stored)
+    except IntegrityError as exc:
+        # 0007 指挥/指导老师规则：GaussDB 延迟触发器在事务提交时才抛错，
+        # 必须在 atomic 块外接住；无关的完整性错误原样抛出。
+        message = report_rule_message(exc)
+        if message is None:
+            raise
+        return response(failure(message))
     write_log(user, 2, "创建节目报名表 " + str(report.name))
     return response(success("创建成功", report_dict(report)))
 
@@ -157,25 +165,32 @@ def update_report(request, on_behalf=False):
     if not on_behalf and report.user_id != user.id:
         return response(failure("不具备该报表修改信息权限！"))
     people = data.get("person", [])
-    with transaction.atomic():
-        # Admin/committee edits stay attributed to the owning school so the
-        # report's ownership and its people records never change hands.
-        ok, stored = store_people(report.user_id if on_behalf else user, people)
-        if not ok:
-            transaction.set_rollback(True)
-            return response(failure(stored))
-        fields = {f.name for f in Report._meta.fields}
-        fields -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
-        for key, value in data.items():
-            if key in fields and key not in {"status", "dinner_reservation"}:
-                setattr(report, key, value)
-        if "dinner_reservation" in fields:
-            report.dinner_reservation = data.get("dinner_reservation") or []
-        if not on_behalf:
-            report.user_id = user.id
-        report.status = 0
-        report.save()
-        attach_report_people(report.id, stored)
+    try:
+        with transaction.atomic():
+            # Admin/committee edits stay attributed to the owning school so the
+            # report's ownership and its people records never change hands.
+            ok, stored = store_people(report.user_id if on_behalf else user, people)
+            if not ok:
+                transaction.set_rollback(True)
+                return response(failure(stored))
+            fields = {f.name for f in Report._meta.fields}
+            fields -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
+            for key, value in data.items():
+                if key in fields and key not in {"status", "dinner_reservation"}:
+                    setattr(report, key, value)
+            if "dinner_reservation" in fields:
+                report.dinner_reservation = data.get("dinner_reservation") or []
+            if not on_behalf:
+                report.user_id = user.id
+            report.status = 0
+            report.save()
+            attach_report_people(report.id, stored)
+    except IntegrityError as exc:
+        # 同 create_report：0007 规则的 IntegrityError 转友好提示，其余照抛。
+        message = report_rule_message(exc)
+        if message is None:
+            raise
+        return response(failure(message))
     write_log(user, 1, "修改节目报名表 " + str(data.get("name", report.name)))
     return response(success("修改成功！", None))
 
@@ -896,6 +911,13 @@ def register_draft_routes(prefix, expected, scope):
             }))
         except DraftError as exc:
             return _draft_error_response(exc)
+        except IntegrityError as exc:
+            # 0007 规则（指挥/指导老师）的 IntegrityError 转草稿接口的统一错误响应；
+            # 无关的完整性错误原样抛出。
+            message = report_rule_message(exc)
+            if message is None:
+                raise
+            return _draft_error_response(DraftIntegrityError(message))
         except (ValueError, ValidationError) as exc:
             return _draft_error_response(SubmissionError(str(exc)))
 

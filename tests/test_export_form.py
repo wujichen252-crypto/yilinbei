@@ -51,6 +51,13 @@ class RegistrationFormContextTests(ApiTestCase):
         self.assertEqual(ctx["reserve_names"], "李四")
         self.assertIn("请安排停车", ctx["remark"])
 
+    def test_type_checkbox_brass_only_checks_brass(self):
+        # 回归："管乐团"是"铜管乐团"的子串，勾选铜管时不得连带勾上管乐团
+        brass = self.make_report(self.school, school_name="某某中学",
+                                 establishment="铜管乐团", group="小学组")
+        ctx = form_context(brass)
+        self.assertEqual(ctx["type_line"], "管乐团□　　铜管乐团■")
+
     def test_instrument_buckets_match_official_columns(self):
         # 官方表格 17 栏：上低音萨克斯与长号均单列；表外乐器（如次中音号）并入"其他"
         self.add_person("甲", 0, instrument="上低音萨克斯")
