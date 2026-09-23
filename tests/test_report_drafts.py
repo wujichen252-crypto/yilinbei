@@ -1,7 +1,10 @@
 import json
 
+from django.test import TestCase
+
 from apps.core.models import Person, Report, ReportDraft, ReportPerson
-from apps.core.report_drafts import (DraftError, decode_payload, encode_payload,
+from apps.core.report_drafts import (REPORT_ALLOWED_GROUPS, DraftError, InvalidSubmission,
+                                     assert_group_allowed, decode_payload, encode_payload,
                                      normalize_draft_payload)
 
 from .base import ApiTestCase
@@ -217,6 +220,33 @@ class DraftApiTests(ApiTestCase):
         self.assertIn("小学组", second.json().get("msg", ""))
         self.assertEqual(Report.objects.filter(user_id=self.city.id).count(), 2)
 
+    # ----- 回归：市级渠道不得报送大学组（渠道 × 组别的归属校验）-----
+    # 口径：组委会 2026-09-23「city 渠道不能出现大学组，铜管乐团同规则」。
+    #
+    # 归属校验故意抛 InvalidSubmission(400) 而不是 ReportQuotaExceeded(409)。
+    # 前端 normalizeDraftError 只对**已登记的错误码**单独分支，未登记的码退到按 HTTP
+    # 状态兜底：409 会被判成「版本冲突」，弹的是硬编码的「该草稿已在其他页面或设备更新」
+    # 外加一个解决不了这个问题的「重新加载服务器草稿」按钮；400 则落到 INVALID，
+    # 走 OrchestraForm.notifyDraftError 的兜底分支原样显示 msg。所以 400 才让用户看得见原因。
+    def test_city_cannot_submit_university_group(self):
+        self.authorize_as(self.city)
+        created = self.json_request("post", "/api/city/report/drafts", {
+            "payload": self.payload(group="大学组")
+        }).json()["data"]
+        submit = self.json_request(
+            "post", "/api/city/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"]})
+        self.assertEqual(submit.status_code, 400, submit.content)
+        self.assertEqual(submit.json().get("code"), "SUBMISSION_VALIDATION_FAILED")
+        # 文案必须点出是哪个组别不行，否则用户不知道该改成什么
+        self.assertIn("大学组", submit.json().get("msg", ""))
+        # 不得留下正式报名
+        self.assertFalse(Report.objects.filter(user_id=self.city.id).exists())
+        # 草稿要留在「编辑中」：整块事务回滚了，用户改完组别还能再提交，不会卡死
+        draft = ReportDraft.objects.get(pk=int(created["draft_id"]))
+        self.assertEqual(draft.state, ReportDraft.STATE_EDITING)
+        self.assertEqual(draft.version, created["version"])
+
     # ----- 回归：P2-2 非对象 JSON body 应回 400 -----
     def test_non_object_json_body_returns_400(self):
         for bad_body in ('"abc"', '[1, 2, 3]', '3'):
@@ -226,3 +256,35 @@ class DraftApiTests(ApiTestCase):
                 content_type="application/json",
             )
             self.assertEqual(result.status_code, 400, "body=%s" % bad_body)
+
+
+class GroupEligibilityTests(TestCase):
+    """直接测 REPORT_ALLOWED_GROUPS / assert_group_allowed 的分支，不走 HTTP。
+
+    上面那条 API 测试只能证明「市级 + 大学组被拦」，证不了「高校端没被顺手拦住」——
+    而「高校端不加校验」是刻意的决定，必须钉住，否则将来有人补全这张表时会误伤高校端。
+    """
+
+    def test_city_rejects_university_group(self):
+        for scope in (1,):
+            with self.assertRaises(InvalidSubmission):
+                assert_group_allowed(scope, "大学组")
+
+    def test_city_still_allows_elementary_and_middle(self):
+        assert_group_allowed(1, "小学组")   # 不抛即通过
+        assert_group_allowed(1, "中学组")
+
+    def test_unlisted_scope_is_not_restricted(self):
+        # scope 0（高校端）本次明确不加校验；scope 4（省级）是西部音乐周遗留，本届无省级端。
+        # 两者都不在表里 → 一律放行。新增渠道忘了配表时也是这个后果（不校验），不会误拦用户。
+        assert_group_allowed(0, "小学组")
+        assert_group_allowed(0, "任意组别")
+        assert_group_allowed(4, "任意组别")
+        self.assertNotIn(0, REPORT_ALLOWED_GROUPS)
+        self.assertNotIn(4, REPORT_ALLOWED_GROUPS)
+
+    def test_missing_group_falls_through_to_required_field_check(self):
+        # 组别为空不在本函数拦 —— 必填校验归 parse_submission_payload，
+        # 否则同一个错误会出现两句不同的文案。
+        assert_group_allowed(1, None)
+        assert_group_allowed(1, "")

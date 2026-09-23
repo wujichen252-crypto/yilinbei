@@ -17,6 +17,25 @@ from .services import attach_report_people, store_people
 REPORT_QUOTA_BY_SCOPE = {0: 1, 1: 1, 4: 8}
 DEFAULT_REPORT_QUOTA = 1
 
+# 各 scope 允许报送的组别。**未列出的 scope 一律不做组别归属校验**（保持现状）。
+#
+# 口径依据（组委会 2026-09-23 答复，前端 HaveToRead.vue §二段 2 同步记载）：
+#   · 市级渠道（scope 1）只能报小学组、中学组，**不得出现大学组** ——
+#     大学组归高校渠道。管乐团与铜管乐团同规则（不再按乐团类型细分）。
+#   · 「最多两支」由配额自动满足，不靠本表：本表限死 2 个组别，配额又是每组别 1 支，
+#     两者相乘即上限 2，且必然是一支小学、一支中学 —— 所以不可能出现「2 支小学组」。
+#   · 两支的乐团类型互相独立（小学管乐团 + 中学铜管乐团是允许的）。后端
+#     establishment 与 group 之间**零耦合**，本来就是自由的，无需改动。
+#
+# 为什么只有 scope 1：
+#   · scope 0（高校端）组委会明确要求本次**不加**校验，故不入表；
+#   · scope 4（省级）是上一届西部音乐周 dist 包留下的，本届红头文件没有省级端，
+#     故不入表（不入表 = 不校验，保持现状，不为历史代码写新规则）。
+REPORT_ALLOWED_GROUPS = {1: ("小学组", "中学组")}
+
+# 仅用于拼错误文案；查不到时退到「当前渠道」
+REPORT_SCOPE_LABELS = {0: "高校端", 1: "市级渠道", 4: "省级端"}
+
 REPORT_FIELDS = {
     "choir_name", "name", "name1", "school_name", "desc", "group",
     "establishment", "establishment_name", "contact_name", "contact_phone",
@@ -84,8 +103,29 @@ def lock_user_slot(user_id):
     return User.all_objects.select_for_update().filter(pk=user_id).first()
 
 
+def assert_group_allowed(scope, group):
+    """校验该渠道能不能报这个组别。允许表见 REPORT_ALLOWED_GROUPS。
+
+    **未配表的 scope 一律放行** —— 所以将来新增渠道时忘了配表，后果是「不校验」，
+    而不是「用户全被拦死」。
+    """
+    if not group:
+        # 组别缺失时不在这里拦：必填校验归 parse_submission_payload 的 required 列表
+        return
+    allowed = REPORT_ALLOWED_GROUPS.get(scope)
+    if allowed is None or group in allowed:
+        return
+    label = REPORT_SCOPE_LABELS.get(scope, "当前渠道")
+    raise InvalidSubmission("%s只能报送%s，不能报送%s" % (label, "或".join(allowed), group))
+
+
 def assert_report_quota(user, scope, group=None):
     """必须在 lock_user_slot 之后、同一事务内调用。
+
+    【本函数是「这条报名能不能建」的统一闸口】除了配额，它还顺带校验渠道与组别的归属
+    （assert_group_allowed）。放这里是因为全仓只有两个调用点 —— create_report 与
+    create_report_from_submission —— 都是新建报名的必经之路，加在这里两个入口自动覆盖，
+    将来多一个调用点也不会漏。请注意函数名只说了 quota，组别校验是搭车的。
 
     【配额的单位是「组别」，不是「账号」】
     口径依据（不是推测，是仓库里已有的书面口径）：
@@ -100,6 +140,7 @@ def assert_report_quota(user, scope, group=None):
 
     group 取不到时退回账号级计数（宁严不松，不会凭空多放行一支）。
     """
+    assert_group_allowed(scope, group)
     limit = REPORT_QUOTA_BY_SCOPE.get(scope, DEFAULT_REPORT_QUOTA)
     queryset = Report.objects.filter(user_id=user.id)
     if group:
