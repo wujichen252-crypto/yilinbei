@@ -338,7 +338,28 @@ def scan_list(request):
 
 @api.post("/scan/cau", auth=auth)
 def scan_create_update(request):
-    data = body(request); obj, created = ScanFiles.objects.get_or_create(user_id=request.auth.id, type=data.get("type"))
+    data = body(request)
+    # type 必须是已定义渠道（0=高校渠道/学校账号，1=市级渠道）内的整数，缺失/非法回 400 而不是 500
+    scan_type = data.get("type")
+    if isinstance(scan_type, bool) or not isinstance(scan_type, int) or scan_type not in (0, 1):
+        return response(failure("type 参数不合法"), 400)
+    # files 显式传空数组=覆盖清空已存审核图（接口无删除语义，只能视为误伤），直接拒绝；
+    # 结构非法（非数组、非对象、缺 url）同样不落库，避免前端按 files[i].url 渲染时炸掉
+    if "files" in data:
+        incoming = data["files"]
+        if not isinstance(incoming, list):
+            return response(failure("files 须为文件数组"))
+        if not incoming:
+            return response(failure("请先上传文件"))
+        bad = any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("url"), str)
+            or not item["url"].strip()
+            for item in incoming
+        )
+        if bad:
+            return response(failure("files 每项须为含 url 的对象"))
+    obj, created = ScanFiles.objects.get_or_create(user_id=request.auth.id, type=scan_type)
     for key in ("files", "status", "remark"):
         if key in data: setattr(obj, key, data[key])
     obj.save()
@@ -464,10 +485,9 @@ def admin_recommend_list(request):
     return err or response(list_page(Recommend.objects.all().order_by("-created_at"), request, recommend_dict))
 
 
-def user_list(request, committee=False):
-    qs = User.objects.all().order_by("id"); keyword = request.GET.get("keyword")
-    if committee:
-        qs = qs.filter(type__in=(0, 4))
+def user_list(request):
+    # 省级（4）为无效数据，admin 与 committee 均只展示学校（0）和市级（1）
+    qs = User.objects.filter(type__in=(0, 1)).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
     return response(list_page(qs, request, user_dict))
 
@@ -515,7 +535,7 @@ def register_user_routes(prefix, expected):
     committee = expected == 2
     @api.get(prefix + "/user/list", auth=auth, operation_id=tag + "_user_list")
     def _list(request):
-        err = role_error(request, expected); return err or user_list(request, committee)
+        err = role_error(request, expected); return err or user_list(request)
     @api.put(prefix + "/user/", auth=auth, operation_id=tag + "_user_update")
     def _update(request):
         err = role_error(request, expected); return err or user_update_admin(request)
