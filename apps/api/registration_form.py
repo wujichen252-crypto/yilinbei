@@ -1,18 +1,24 @@
 """报名信息表 PDF 导出：按组委会《附件2》式样逐项排版，每张报名表一页。
 
+字体按 0921 定稿通知 docx 还原：表格 仿宋_GB2312（标签加粗）、标题 方正小标宋
+22pt（本机无此字体时用华文中宋替代）、「附件2」黑体 16pt。Windows 字体文件缺失
+（如 Linux 生产环境）时整体回退 STSong-Light。
+
 数据映射沿用 /api/export/report 原有口径：ReportPerson.position 0=正式队员、
 1=预备队员、2=指挥、4=指导老师；乐器名经 _instrument_bucket 归一到官方表格
-的 16 个栏目。reportlab 缺失时降级为 CSV 文本（与 views.pdf_response 一致）。
+的栏目。reportlab 缺失时降级为 CSV 文本（与 views.pdf_response 一致）。
 """
 import io
+import os
 
 from django.http import HttpResponse
 
-# 官方表格的 16 个乐器栏目（含上低音萨克斯、无长号；表外乐器并入"其他"）
+# 附件2（0921 定稿通知 docx）正式队员名单的 17 个乐器栏目，顺序与原文一致；
+# 不在表内的乐器名归入"其他"
 FORM_INSTRUMENTS = (
     "短笛", "长笛", "单簧管", "低音单簧管", "中音萨克斯", "次中音萨克斯",
-    "双簧管", "大管", "小号", "上低音萨克斯", "圆号", "上低音号",
-    "大号", "打击乐", "低音大提琴", "其他",
+    "上低音萨克斯", "双簧管", "大管", "小号", "长号", "圆号",
+    "上低音号", "大号", "打击乐", "低音大提琴", "其他",
 )
 MEALS = ("11月20日午餐", "11月20日晚餐", "11月21日午餐", "11月21日晚餐",
          "11月22日午餐", "11月22日晚餐")
@@ -24,32 +30,75 @@ MEAL_HINTS = (("20", "午"), ("20", "晚"), ("21", "午"), ("21", "晚"),
 TITLE_LINE_1 = "“意林杯”四川省第十二届管乐展示活动"
 TITLE_LINE_2 = "报名信息表"
 FORM_NOTES = (
-    "备注：1. 如果需在成都理工大学食堂购票用餐，请备注时间并在对应位置填写上就餐人数。",
-    "2. 10月24日前，网络报名成功后从系统导出并打印《“意林杯”四川省第十二届管乐展示活动报名信息表》，"
+    "备注：1. 如果需在成都理工大学食堂购票用餐，请备注时间并在对应位置写上就餐人数。",
+    "2.10月24日前，网络报名成功后从系统导出并打印《“意林杯”四川省第十二届管乐展示活动报名信息表》，"
     "加盖公章后再扫描（拍照）上传系统；从报名系统上传参加展示活动的曲目视频；"
     "并上传分辨率为600dpi（JPEG或TIFF）的乐团集体照片，及300字以内的乐团简介。",
-    "3. 报名表的正式队员名单中，铜管乐团可以根据自己的编制填写相关乐器的参展人员名单，无关乐器可不填写。",
+    "3.报名表的正式队员名单中，铜管乐团可以根据自己的编制填写相关乐器的参展人员名单，无关乐器可不填写。",
 )
+
+
+# docx 字体的本机替代（按优先级）；全部缺失时回退 STSong-Light
+_FONT_FILES = (
+    ("YLB-FangSong", "fangsong", ("C:/Windows/Fonts/simfang.ttf",
+                                  "C:/Windows/Fonts/STFANGSO.TTF")),
+    ("YLB-BiaoSong", "biaosong", ("C:/Windows/Fonts/STZHONGS.TTF",)),
+    ("YLB-Hei", "hei", ("C:/Windows/Fonts/simhei.ttf",)),
+)
+_FACES = None
+
+
+def _faces():
+    """注册 docx 对应字体并缓存 {角色: 字体名}；加粗走同族映射（标签 <b>）。"""
+    global _FACES
+    if _FACES is not None:
+        return _FACES
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    if "STSong-Light" not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    faces = {"fangsong": "STSong-Light", "biaosong": "STSong-Light", "hei": "STSong-Light"}
+    for reg_name, role, candidates in _FONT_FILES:
+        if reg_name in pdfmetrics.getRegisteredFontNames():
+            faces[role] = reg_name
+            continue
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    pdfmetrics.registerFont(TTFont(reg_name, path))
+                    faces[role] = reg_name
+                except Exception:  # 字体文件异常时按缺失处理
+                    pass
+                break
+    # 标签加粗：仿宋无粗体文件，用中宋做族内 bold 近似 Word 的合成加粗
+    pdfmetrics.registerFontFamily(faces["fangsong"], normal=faces["fangsong"],
+                                  bold=faces["biaosong"], italic=faces["fangsong"],
+                                  boldItalic=faces["biaosong"])
+    _FACES = faces
+    return faces
 
 
 def _styles():
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
     from reportlab.lib.styles import ParagraphStyle
+    faces = _faces()
 
-    def make(name, size, alignment=TA_CENTER, leading=None):
-        return ParagraphStyle(name, fontName="STSong-Light", fontSize=size,
+    def make(name, size, font=None, alignment=TA_CENTER, leading=None):
+        return ParagraphStyle(name, fontName=font or faces["fangsong"], fontSize=size,
                               leading=leading or size * 1.45, alignment=alignment,
                               textColor=colors.black)
 
     return {
-        "title": make("title", 15),
+        "title": make("title", 22, faces["biaosong"], leading=30),
+        "attach": make("attach", 16, faces["hei"], TA_LEFT),
+        "label": make("label", 10.5),
         "body": make("body", 10.5),
-        "small": make("small", 9, TA_LEFT),
-        "smallc": make("smallc", 9),
-        "note": make("note", 9, TA_LEFT),
-        "right": make("right", 10.5, TA_RIGHT),
-        "attach": make("attach", 10.5, TA_LEFT),
+        "small": make("small", 10.5, alignment=TA_LEFT),
+        "smallc": make("smallc", 10.5),
+        "note": make("note", 10.5, alignment=TA_LEFT),
     }
 
 
@@ -80,9 +129,9 @@ def _meal_cells(report):
 
 
 def _checkline(options, value):
-    """乐团类型 / 参展组别：命中项打 ■，其余保持 □（GB2312 字体内可用）。"""
+    """乐团类别 / 参展组别：命中项打 ■，其余保持 □（GB2312 字体内可用）。"""
     value = str(value or "")
-    return "　".join(
+    return "　　".join(
         f"{option}■" if option in value else f"{option}□"
         for option in options
     )
@@ -109,7 +158,7 @@ def form_context(report):
     for person in formal:
         bucket = _instrument_bucket(getattr(person, "instrument", ""))
         if bucket not in instrument_names:
-            bucket = "其他"  # 表外乐器（如长号）统一并入"其他"栏
+            bucket = "其他"  # 不在附件2 表内的乐器名统一并入"其他"栏
         instrument_names[bucket].append(_person_name(person))
 
     remark_parts = [str(report.remark or "")]
@@ -181,46 +230,55 @@ def _report_story(report, styles, is_last):
     meal_table = Table(
         [[cell(label, "smallc") for label in MEAL_LABELS],
          [cell(text, "body") for text in ctx["meal_cells"]]],
-        colWidths=[(CELL_INNER / 6) * mm] * len(MEALS),
+        colWidths=[(CONTENT_WIDTH / 6) * mm] * len(MEALS),
     )
     meal_table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.6, colors_black()),
+        ("GRID", (0, 0), (-1, -1), 0.8, colors_black()),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]))
 
     school_cell = Table(
-        [[cell(ctx["school"], "body"), cell("（盖章）", "right")]],
+        [[cell(ctx["school"], "body"), cell("（盖章）")]],
         colWidths=[(CELL_INNER - 36) * mm, 36 * mm],
     )
     school_cell.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
 
+    def lbl(text):
+        """docx 中左列标签与「联系电话」为仿宋加粗（族内 bold 映射）。"""
+        return Paragraph(f"<b>{text}</b>", styles["label"])
+
     rows = [
-        ["参展学校", school_cell, "", ""],
-        ["领队姓名", cell(ctx["leader_name"]), "联系电话", cell(ctx["leader_phone"])],
-        ["指挥", cell(ctx["conductor_name"]), "联系电话", cell(ctx["conductor_phone"])],
-        [cell("指导老师<br/>（本校在职）"),
-         cell(teacher_slots[0][0]), "联系电话", cell(teacher_slots[0][1])],
-        ["", cell(teacher_slots[1][0]), "联系电话", cell(teacher_slots[1][1])],
-        ["乐团类型", cell(ctx["type_line"]), "", ""],
-        ["参展组别", cell(ctx["group_line"]), "", ""],
-        ["指定曲目", cell(ctx["assigned_song"]), "", ""],
-        ["自选曲目", cell(ctx["optional_song"]), "", ""],
-        ["参展人数", cell(ctx["headcount"]), "", ""],
-        [cell("正式队员名单<br/>（可单独提供）"), instrument_table, "", ""],
-        ["预备队员名单", cell(ctx["reserve_names"]), "", ""],
-        ["备注", cell(ctx["remark"].replace("\n", "<br/>")), "", ""],
-        ["用餐预约", meal_table, "", ""],
+        [lbl("参展学校"), school_cell, "", ""],
+        [lbl("领队姓名"), cell(ctx["leader_name"]), lbl("联系电话"), cell(ctx["leader_phone"])],
+        [lbl("指挥"), cell(ctx["conductor_name"]), lbl("联系电话"), cell(ctx["conductor_phone"])],
+        [lbl("指导老师<br/>（本校在职）"),
+         cell(teacher_slots[0][0]), lbl("联系电话"), cell(teacher_slots[0][1])],
+        ["", cell(teacher_slots[1][0]), lbl("联系电话"), cell(teacher_slots[1][1])],
+        [lbl("乐团类别"), cell(ctx["type_line"]), "", ""],
+        [lbl("参展组别"), cell(ctx["group_line"]), "", ""],
+        [lbl("指定曲目"), cell(ctx["assigned_song"]), "", ""],
+        [lbl("自选曲目"), cell(ctx["optional_song"]), "", ""],
+        [lbl("参展人数"), cell(ctx["headcount"]), "", ""],
+        [lbl("正式队员<br/>名单（可单独表格提供）"), instrument_table, "", ""],
+        [lbl("预备队员<br/>名　　单"), cell(ctx["reserve_names"]), "", ""],
+        [lbl("备注"), cell(ctx["remark"].replace("\n", "<br/>")), "", ""],
+        [lbl("用餐预约"), meal_table, "", ""],
     ]
     table = Table(rows, colWidths=[w * mm for w in COLUMN_WIDTHS], repeatRows=0)
     table.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.8, colors_black()),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),
+        ("FONTNAME", (0, 0), (-1, -1), _faces()["fangsong"]),
         ("FONTSIZE", (0, 0), (-1, -1), 10.5),
         ("LEFTPADDING", (0, 0), (-1, -1), 5),
         ("RIGHTPADDING", (0, 0), (-1, -1), 5),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        # 用餐格嵌套表铺满整个跨列单元格，让内外边框重合（docx 中没有额外的框）
+        ("LEFTPADDING", (1, 13), (3, 13), 0),
+        ("RIGHTPADDING", (1, 13), (3, 13), 0),
+        ("TOPPADDING", (1, 13), (3, 13), 0),
+        ("BOTTOMPADDING", (1, 13), (3, 13), 0),
         ("SPAN", (0, 3), (0, 4)),  # 指导老师标签纵跨两个名额槽
         ("SPAN", (1, 0), (3, 0)),
         ("SPAN", (1, 5), (3, 5)),

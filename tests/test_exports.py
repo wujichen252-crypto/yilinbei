@@ -46,8 +46,9 @@ class ExportCompatibilityTests(ApiTestCase):
 class PdfExportTests(ApiTestCase):
     """HTTP-level checks for the two reportlab endpoints (first coverage there).
 
-    The STSong-Light assertion relies on reportlab's default pageCompression=0,
-    which keeps font resource names visible in the raw bytes.
+    The font-object assertion only requires a /Type /Font resource: the report
+    form embeds Windows TTF faces when available and falls back to the
+    non-embedded STSong-Light CID font elsewhere.
     """
 
     def setUp(self):
@@ -62,7 +63,9 @@ class PdfExportTests(ApiTestCase):
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result["Content-Type"], "application/pdf")
         self.assertTrue(result.content.startswith(b"%PDF-"))  # not the CSV fallback
-        self.assertIn(b"STSong-Light", result.content)
+        # 字体资源对象存在即可：报名信息表导出按 docx 优先内嵌仿宋等 TTF，
+        # 字体文件缺失的环境回退 STSong-Light，两者都带 /Type /Font
+        self.assertIn(b"/Type /Font", result.content)
 
     def test_export_person_returns_pdf_and_requires_auth(self):
         report = self.make_report(self.school, status=0)
