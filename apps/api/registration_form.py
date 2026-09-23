@@ -78,6 +78,58 @@ def _faces():
     return faces
 
 
+_KINSOKU_EXTRA = "，；：？！、）》」』】〕〉»％‰"
+
+
+def _cannot_start():
+    import reportlab.lib.textsplit as textsplit
+    return textsplit.ALL_CANNOT_START
+
+
+def _enable_cjk_kinsoku():
+    """补全 reportlab 避头点表：内置表缺「》，；」等全角标点，CJK 折行时
+    会把闭合标点顶到行首（如「报名信息表》」被拆开）。幂等。"""
+    import reportlab.lib.textsplit as textsplit
+    import reportlab.platypus.paragraph as rl_paragraph
+
+    merged = textsplit.ALL_CANNOT_START + "".join(
+        c for c in _KINSOKU_EXTRA if c not in textsplit.ALL_CANNOT_START)
+    textsplit.ALL_CANNOT_START = merged
+    rl_paragraph.ALL_CANNOT_START = merged
+
+
+def _wrap_cjk(text, font, size, max_width):
+    """中文避头尾折行：标点不落行首时连同前一个字一起移到下一行（Word 式）。
+
+    reportlab 的 cjkFragSplit 只悬挂一个标点、不链式回退，这里对整段自行
+    预折行（备注等纯文本段），用 <br/> 输出固定行。
+    """
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    cannot_start = _cannot_start()
+    lines, cur = [], ""
+    for ch in text:
+        if ch == "\n":
+            lines.append(cur)
+            cur = ""
+            continue
+        if not cur or stringWidth(cur + ch, font, size) <= max_width:
+            cur += ch
+            continue
+        nxt = ch  # 本字放不下；若它是行禁首标点，把当前行尾字一并带下来
+        while cur and nxt[0] in cannot_start:
+            nxt = cur[-1] + nxt
+            cur = cur[:-1]
+        # 西文/数字单词不拆（如 "600dpi"）：下行以西文开头时，行尾连续西文一并带下
+        while cur and ord(nxt[0]) < 0x3000 and ord(cur[-1]) < 0x3000 and not cur[-1].isspace():
+            nxt = cur[-1] + nxt
+            cur = cur[:-1]
+        lines.append(cur)
+        cur = nxt
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def _styles():
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
@@ -87,7 +139,7 @@ def _styles():
     def make(name, size, font=None, alignment=TA_CENTER, leading=None):
         return ParagraphStyle(name, fontName=font or faces["fangsong"], fontSize=size,
                               leading=leading or size * 1.45, alignment=alignment,
-                              textColor=colors.black)
+                              textColor=colors.black, wordWrap="CJK")
 
     return {
         "title": make("title", 22, faces["biaosong"], leading=30),
@@ -295,8 +347,15 @@ def _report_story(report, styles, is_last):
     ]))
     story.append(table)
     story.append(Spacer(1, 8))
+    # 备注段自行避头尾预折行：reportlab 的 CJK 折行不链式回退，「》，」
+    # 连排时第二个标点仍会顶到行首；行宽按 A4-2×17mm 再扣 Frame 默认
+    # 左右各 6pt 内边距，否则预折行超宽会被 CJK 兜底二次折行
+    from reportlab.lib.pagesizes import A4
+    faces = _faces()
+    note_width = A4[0] - 34 * mm - 12
     for note in FORM_NOTES:
-        story.append(Paragraph(note, styles["note"]))
+        wrapped = "<br/>".join(_wrap_cjk(note, faces["fangsong"], 10.5, note_width))
+        story.append(Paragraph(wrapped, styles["note"]))
     if not is_last:
         story.append(PageBreak())
     return story
@@ -315,6 +374,7 @@ def _render_pdf(reports) -> bytes:
     from apps.api.export_services import _cjk_pdf_font
 
     _cjk_pdf_font()
+    _enable_cjk_kinsoku()
     styles = _styles()
 
     output = io.BytesIO()
