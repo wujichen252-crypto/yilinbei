@@ -94,6 +94,7 @@ def _styles():
         "attach": make("attach", 16, faces["hei"], TA_LEFT),
         "label": make("label", 10.5),
         "body": make("body", 10.5),
+        "value": make("value", 10.5, alignment=TA_LEFT),
         "small": make("small", 10.5, alignment=TA_LEFT),
         "smallc": make("smallc", 10.5),
         "note": make("note", 10.5, alignment=TA_LEFT),
@@ -231,8 +232,11 @@ def _report_story(report, styles, is_last):
         colWidths=[(CONTENT_WIDTH / 6) * mm] * len(MEALS),
     )
     meal_table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.8, colors_black()),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors_black()),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        # 填 √ 的空行加高一点，手写人数/勾选更从容
+        ("TOPPADDING", (0, 1), (-1, 1), 4),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 11),
     ]))
 
     school_cell = Table(
@@ -247,24 +251,24 @@ def _report_story(report, styles, is_last):
 
     rows = [
         [lbl("参展学校"), school_cell, "", ""],
-        [lbl("领队姓名"), cell(ctx["leader_name"]), lbl("联系电话"), cell(ctx["leader_phone"])],
-        [lbl("指挥"), cell(ctx["conductor_name"]), lbl("联系电话"), cell(ctx["conductor_phone"])],
+        [lbl("领队姓名"), cell(ctx["leader_name"], "value"), lbl("联系电话"), cell(ctx["leader_phone"], "value")],
+        [lbl("指挥"), cell(ctx["conductor_name"], "value"), lbl("联系电话"), cell(ctx["conductor_phone"], "value")],
         [lbl("指导老师<br/>（本校在职）"),
-         cell(teacher_slots[0][0]), lbl("联系电话"), cell(teacher_slots[0][1])],
-        ["", cell(teacher_slots[1][0]), lbl("联系电话"), cell(teacher_slots[1][1])],
-        [lbl("乐团类别"), cell(ctx["type_line"]), "", ""],
-        [lbl("参展组别"), cell(ctx["group_line"]), "", ""],
-        [lbl("指定曲目"), cell(ctx["assigned_song"]), "", ""],
-        [lbl("自选曲目"), cell(ctx["optional_song"]), "", ""],
-        [lbl("参展人数"), cell(ctx["headcount"]), "", ""],
+         cell(teacher_slots[0][0], "value"), lbl("联系电话"), cell(teacher_slots[0][1], "value")],
+        ["", cell(teacher_slots[1][0], "value"), lbl("联系电话"), cell(teacher_slots[1][1], "value")],
+        [lbl("乐团类别"), cell(ctx["type_line"], "value"), "", ""],
+        [lbl("参展组别"), cell(ctx["group_line"], "value"), "", ""],
+        [lbl("指定曲目"), cell(ctx["assigned_song"], "value"), "", ""],
+        [lbl("自选曲目"), cell(ctx["optional_song"], "value"), "", ""],
+        [lbl("参展人数"), cell(ctx["headcount"], "value"), "", ""],
         [lbl("正式队员<br/>名单（可单独表格提供）"), instrument_table, "", ""],
-        [lbl("预备队员<br/>名　　单"), cell(ctx["reserve_names"]), "", ""],
-        [lbl("备注"), cell(ctx["remark"].replace("\n", "<br/>")), "", ""],
+        [lbl("预备队员<br/>名　　单"), cell(ctx["reserve_names"], "value"), "", ""],
+        [lbl("备注"), cell(ctx["remark"].replace("\n", "<br/>"), "value"), "", ""],
         [lbl("用餐预约"), meal_table, "", ""],
     ]
     table = Table(rows, colWidths=[w * mm for w in COLUMN_WIDTHS], repeatRows=0)
     table.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.8, colors_black()),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors_black()),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("FONTNAME", (0, 0), (-1, -1), _faces()["fangsong"]),
         ("FONTSIZE", (0, 0), (-1, -1), 10.5),
