@@ -43,13 +43,13 @@ from apps.core.services import (BodyError, attach_report_people, failure,
 
 from .auth import BearerAuth
 from .export_services import (
-    _cjk_pdf_font,
     admin_data1_response,
     admin_data2_response,
     draw_all_response,
     draw_response,
     reports_export_response,
 )
+from .person_export import person_export_blocks, person_export_response
 from .registration_form import registration_form_response
 
 api = NinjaAPI(title="YLB Government Program API", version="1.0.0",
@@ -236,30 +236,6 @@ def xlsx_response(rows, filename):
     return result
 
 
-def pdf_response(rows, filename):
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.pdfgen import canvas
-        output = io.BytesIO()
-        canvas_obj = canvas.Canvas(output, pagesize=A4)
-        font = _cjk_pdf_font()
-        canvas_obj.setFont(font, 9)
-        y = 810
-        for row in rows:
-            canvas_obj.drawString(36, y, " | ".join(str(x or "") for x in row)[:180])
-            y -= 16
-            if y < 40:
-                canvas_obj.showPage(); y = 810
-                canvas_obj.setFont(font, 9)  # showPage resets graphics state
-        canvas_obj.save()
-        content = output.getvalue()
-    except ImportError:
-        content = "\n".join(",".join(str(x or "") for x in row) for row in rows).encode()
-    result = HttpResponse(content, content_type="application/pdf")
-    result["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return result
-
-
 @api.post("/login")
 def login(request):
     data = body(request)
@@ -394,15 +370,9 @@ def export_report(request):
 
 @api.get("/export/person", auth=auth)
 def export_person(request):
-    rows = [["序号", "姓名", "性别", "年龄", "学校名称", "身份", "角色", "备注"]]
-    sequence = 0
-    for report in Report.objects.filter(user_id=request.auth.id, status__gte=0).order_by("id"):
-        for link in ReportPerson.objects.filter(report_id=report.id):
-            p = Person.objects.filter(pk=link.person_id).first()
-            if p and link.position != 4:
-                sequence += 1
-                rows.append([sequence, p.name, p.gender or "", p.age or "", p.school or "", link.type, link.position, p.remark or ""])
-    return pdf_response(rows, "参演人员信息表.pdf")
+    """参演人员信息表：按 Laravel ExportController::exportReportPerson 的实际输出复刻。"""
+    blocks = person_export_blocks(request.auth.id)
+    return person_export_response(request.auth, blocks, "参演人员信息表.pdf")
 
 
 @api.get("/export/data", auth=auth)
