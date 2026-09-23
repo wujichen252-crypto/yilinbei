@@ -14,9 +14,11 @@ def decode_disposition(raw):
                    for value, charset in parts)
 
 
-def link(report, person, position):
-    return ReportPerson.objects.create(report_id=report.id, person_id=person.id,
-                                       position=position, type=position)
+def link(report, person, position, type=None):
+    # type 未指定时沿用旧夹具惯例（type=position，即未知身份，规则放行）
+    return ReportPerson.objects.create(
+        report_id=report.id, person_id=person.id, position=position,
+        type=position if type is None else type)
 
 
 class RegistrationFormContextTests(ApiTestCase):
@@ -29,11 +31,11 @@ class RegistrationFormContextTests(ApiTestCase):
             name1="指定曲目A", name="自选曲目B", remark="请安排停车",
         )
 
-    def add_person(self, name, position, instrument="", phone=""):
+    def add_person(self, name, position, instrument="", phone="", type=None):
         person = Person.objects.create(name=name, user_id=self.school.id,
                                        card=f"card-{name}", instrument=instrument,
                                        phone=phone)
-        link(self.report, person, position)
+        link(self.report, person, position, type=type)
         return person
 
     def test_checkboxes_school_fallback_and_headcount(self):
@@ -81,6 +83,41 @@ class RegistrationFormContextTests(ApiTestCase):
         self.assertEqual(ctx["conductor_phone"], "13900000001")
         self.assertEqual(ctx["teacher_lines"], ["1. 刘老师", "2. 陈老师"])
         self.assertEqual(ctx["teacher_phones"], ["13900000002", "13900000003"])
+
+    def test_teacher_conductor_takes_first_instructor_slot(self):
+        # 附件2 口径：指挥是教师（type=1）时，第一指导老师槽自动填指挥本人
+        #（姓名+联系电话），学校另报的指导老师顺延到第 2 槽
+        self.add_person("王指挥", 2, phone="13900000001", type=1)
+        self.add_person("刘老师", 4, phone="13900000002")
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 王指挥", "2. 刘老师"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000001", "13900000002"])
+
+    def test_teacher_conductor_without_instructor_fills_only_first_slot(self):
+        self.add_person("王指挥", 2, phone="13900000001", type=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 王指挥"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000001"])
+
+    def test_teacher_conductor_duplicated_as_instructor_renders_once(self):
+        # 同一位教师指挥被重复提交为指导老师（同 person_id）时只渲染一次
+        conductor = self.add_person("王指挥", 2, phone="13900000001", type=1)
+        link(self.report, conductor, 4, type=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 王指挥"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000001"])
+
+    def test_student_conductor_does_not_fill_instructor_slot(self):
+        # 指挥是学生或身份未知时不自动填充，指导老师槽只列学校另报的人
+        self.add_person("学生指挥", 2, phone="13900000001", type=0)
+        self.add_person("刘老师", 4, phone="13900000002")
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 刘老师"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000002"])
 
     def test_meal_slots_accept_index_label_and_abbreviation(self):
         self.report.dinner_reservation = [0, "11月21日晚餐", "22午"]

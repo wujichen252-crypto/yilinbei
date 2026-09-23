@@ -5,8 +5,10 @@
 （如 Linux 生产环境）时整体回退 STSong-Light。
 
 数据映射沿用 /api/export/report 原有口径：ReportPerson.position 0=正式队员、
-1=预备队员、2=指挥、4=指导老师；乐器名经 _instrument_bucket 归一到官方表格
-的 17 个栏目（含长号）。reportlab 缺失时降级为 CSV 文本（与 views.pdf_response 一致）。
+1=预备队员、2=指挥、4=指导老师（指挥是教师 type=1 时，第一指导老师槽自动填
+指挥本人，见 export_services.adviser_instructors）；乐器名经 _instrument_bucket
+归一到官方表格的 17 个栏目（含长号）。reportlab 缺失时降级为 CSV 文本
+（与 views.pdf_response 一致）。
 """
 import io
 import os
@@ -191,7 +193,7 @@ def _checkline(options, value):
 
 def form_context(report):
     """把一张报名表整理成官方表格各栏的纯文本值（便于测试与渲染解耦）。"""
-    from apps.api.export_services import _instrument_bucket, _person_name
+    from apps.api.export_services import _instrument_bucket, _person_name, adviser_instructors
     from apps.core.models import Person, ReportPerson, User
 
     links = list(ReportPerson.objects.filter(report_id=report.id))
@@ -202,6 +204,13 @@ def form_context(report):
 
     formal, reserve = members(0), members(1)
     conductors, teachers = members(2), members(4)
+
+    # 附件2 口径：指挥是教师（关系行 type=1）时，第一指导老师槽即指挥本人，
+    # 学校另报的指导老师顺延到第 2 槽（与后台报名数据导出同口径）
+    link_types = {x.person_id: x.type for x in links}
+    teachers = adviser_instructors(
+        conductors, teachers,
+        link_types.get(conductors[0].id) if len(conductors) == 1 else None)
 
     user = User.objects.filter(pk=report.user_id).first()
     school = report.school_name or getattr(user, "nickname", "") or ""
@@ -261,7 +270,8 @@ def _report_story(report, styles, is_last):
         Spacer(1, 10),
     ]
 
-    # 指导老师：官方表格固定两个名额槽，各带一列联系电话；超出 2 人的并入第 2 槽
+    # 指导老师：官方表格固定两个名额槽，各带一列联系电话；超出 2 人的并入第 2 槽。
+    # 指挥为教师时第 1 槽已在 form_context 并入指挥本人（附件2 口径）
     lines, phones = ctx["teacher_lines"], ctx["teacher_phones"]
     teacher_slots = [(lines[i] if i < len(lines) else f"{i + 1}.",
                       phones[i] if i < len(phones) else "") for i in range(2)]
