@@ -37,10 +37,15 @@ REPORT_DATA_HEADINGS = [
     "节目时长", "集体照", "视频文件", "状态", "正式队员", "预备队员", "指挥", "指导教师",
 ]
 
+# data1/data2 的列集与《附件2 报名信息表》（0921 定稿通知 docx 附录）逐栏对齐：
+# 附录栏目在前（栏名与栏序即表格原文），管理辅助列（报名学校/乐团名称/时长/
+# 联系地址/简介/状态）保留在后。乐器 17 栏即附录「正式队员名单」的乐器槽。
 ADMIN_DATA1_HEADINGS = [
-    "序号", "所属单位", "乐团名称", "自选曲目", "指定曲目", "类型", "参演组别",
-    "节目时长", "参展学校名称", "领队姓名", "领队电话", "联系地址", "用餐预约",
-    "乐团简介", "状态", "正式队员", "预备队员", "指挥", "指导教师",
+    "序号", "参展学校名称", "领队姓名", "领队电话", "指挥", "指挥电话",
+    "指导老师1", "指导老师1电话", "指导老师2", "指导老师2电话",
+    "乐团类别", "参展组别", "指定曲目", "自选曲目", "参展人数",
+    "正式队员名单（按乐器）", "预备队员名单", "备注", "用餐预约",
+    "报名学校", "乐团名称", "节目时长", "联系地址", "乐团简介", "状态",
 ]
 
 # The instrument columns of the data2 heading row are derived from this single
@@ -53,11 +58,11 @@ INSTRUMENTS = (
 )
 
 ADMIN_DATA2_HEADINGS = [
-    "序号", "报名学校", "参展学校名称", "乐团名称", "领队", "领队电话", "指挥",
-    "指挥电话", "指挥身份证", "指导老师", "指导老师电话", "指导老师身份证", "乐团类型",
-    "参演组别", "指定曲目", "自选曲目", "曲子时长",
+    "序号", "报名学校", "参展学校名称", "乐团名称", "领队姓名", "领队电话",
+    "指挥", "指挥电话", "指导老师1", "指导老师1电话", "指导老师2", "指导老师2电话",
+    "乐团类别", "参展组别", "指定曲目", "自选曲目", "参展人数",
     *INSTRUMENTS,
-    "合计",
+    "合计", "备注", "用餐预约",
 ]
 
 
@@ -143,6 +148,54 @@ def _joined(members, position):
     return "、".join(_person_name(person) for person in members.get(position, []))
 
 
+# --- 附件2 对齐的共用取值（与报名信息表 PDF 的 form_context 同口径） -----------
+
+def _conductor(members):
+    """指挥与指挥电话：全部指挥「、」相连（附件2 指挥栏 + 联系电话栏）。"""
+    conductors = members.get(2, [])
+    name = "、".join(_person_name(person) for person in conductors)
+    phone = "、".join(str(getattr(p, "phone", "") or "") for p in conductors if getattr(p, "phone", ""))
+    return name, phone
+
+
+def _adviser_slots(teachers):
+    """附件二固定两个指导老师名额槽：第 1 槽取第一位，其余（含超出 2 人）并入第 2 槽。"""
+    if teachers:
+        first = (_person_name(teachers[0]), str(getattr(teachers[0], "phone", "") or ""))
+    else:
+        first = ("", "")
+    rest = teachers[1:]
+    second = (
+        "、".join(_person_name(p) for p in rest),
+        "、".join(str(getattr(p, "phone", "") or "") for p in rest if getattr(p, "phone", "")),
+    )
+    return first, second
+
+
+def _headcount(formal, reserve):
+    """附件2「参展人数」栏的官方文案。"""
+    return f"正式队员 {len(formal)} 人，预备队员 {len(reserve)} 人"
+
+
+def _instrument_roster(members):
+    """正式队员按乐器名单（附件2「正式队员名单」栏）：只列有人的乐器槽，换行分隔。"""
+    names = {key: [] for key in INSTRUMENTS}
+    for person in members.get(0, []):
+        names[_instrument_bucket(getattr(person, "instrument", ""))].append(_person_name(person))
+    return "\n".join(f"{key}：{'、'.join(values)}" for key, values in names.items() if values)
+
+
+def _meal_and_remark(report):
+    """用餐预约归位到官方 6 个时段，无法归位的条目并入备注（与报名信息表 PDF 同口径）。"""
+    from apps.api.registration_form import MEALS, _meal_cells
+    cells, leftovers = _meal_cells(report)
+    meals = "、".join(label for label, mark in zip(MEALS, cells) if mark)
+    parts = [str(report.remark or "")]
+    if leftovers:
+        parts.append("用餐预约：" + "、".join(leftovers))
+    return meals, "\n".join(part for part in parts if part)
+
+
 def report_data_rows(reports: Iterable[Report]) -> list[list]:
     """Rows for ``GET /export/data`` (the 19-column Laravel export)."""
 
@@ -178,34 +231,40 @@ def report_data_rows(reports: Iterable[Report]) -> list[list]:
 
 
 def admin_data1_rows(reports: Iterable[Report]) -> list[list]:
-    """Rows for ``GET /admin/export/data1``."""
+    """Rows for ``GET /admin/export/data1`` (报名数据，列集对齐附件2)."""
 
     records, grouped, users, _files = _snapshot(reports)
     rows = [ADMIN_DATA1_HEADINGS.copy()]
     for index, item in enumerate(records, start=1):
         members = _members(grouped, item.id)
         user = users.get(item.user_id)
-        dinner = _json_list(item.dinner_reservation)
+        formal, reserve = members.get(0, []), members.get(1, [])
+        conductor_name, conductor_phone = _conductor(members)
+        (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(members.get(4, []))
+        meals, remark = _meal_and_remark(item)
         rows.append([
             index,
-            getattr(user, "nickname", "") if user else "",
-            item.choir_name or "",
-            item.name or "",
-            item.name1 or "",
-            item.establishment or "",
-            item.group or "",
-            seconds_to_human(item.time_length),
             item.school_name or "",
             item.contact_name or "",
             item.contact_phone or "",
+            conductor_name,
+            conductor_phone,
+            teacher1_name, teacher1_phone, teacher2_name, teacher2_phone,
+            item.establishment or "",
+            item.group or "",
+            item.name1 or "",
+            item.name or "",
+            _headcount(formal, reserve),
+            _instrument_roster(members),
+            _joined(members, 1),
+            remark,
+            meals,
+            getattr(user, "nickname", "") if user else "",
+            item.choir_name or "",
+            seconds_to_human(item.time_length),
             item.contact_way or "",
-            "、".join(str(x) for x in dinner),
             item.desc or "",
             status_label(item.status),
-            _joined(members, 0),
-            _joined(members, 1),
-            _joined(members, 2),
-            _joined(members, 4),
         ])
     return rows
 
@@ -223,7 +282,11 @@ def _instrument_bucket(instrument):
 
 
 def admin_data2_rows(reports: Iterable[Report]) -> list[list]:
-    """Rows for ``GET /admin/export/data2`` including instrument totals."""
+    """Rows for ``GET /admin/export/data2`` (器乐统计，列集对齐附件2).
+
+    乐器 17 栏对应附件2「正式队员名单」的乐器槽，因此只统计正式队员
+    （预备队员人数体现在「参展人数」栏）。合计即正式队员总数。
+    """
 
     records, grouped, users, _files = _snapshot(reports)
     rows = [ADMIN_DATA2_HEADINGS.copy()]
@@ -231,25 +294,11 @@ def admin_data2_rows(reports: Iterable[Report]) -> list[list]:
         members = _members(grouped, item.id)
         user = users.get(item.user_id)
         instrument_counts = {key: 0 for key in INSTRUMENTS}
-        conduct_name = conduct_phone = conduct_card = ""
-        faculty = []
-        for person in members.get(0, []) + members.get(1, []):
+        for person in members.get(0, []):
             instrument_counts[_instrument_bucket(getattr(person, "instrument", ""))] += 1
-        for person in members.get(2, []):
-            # Laravel assigns the last conductor when malformed duplicate data
-            # exists; retaining that behavior is useful for old records.
-            conduct_name = getattr(person, "name", "") or ""
-            conduct_phone = getattr(person, "phone", "") or ""
-            conduct_card = "'" + str(getattr(person, "card", "") or "")
-        faculty = members.get(4, [])
-        faculty_info = faculty[0] if faculty else None
-        # Source behavior skips the conductor-named first adviser when a second
-        # adviser exists.  Missing advisers are represented by empty cells.
-        if faculty_info and _person_name(faculty_info) == conduct_name and len(faculty) > 1:
-            faculty_info = faculty[1]
-        faculty_name = getattr(faculty_info, "name", "") if faculty_info else ""
-        faculty_phone = getattr(faculty_info, "phone", "") if faculty_info else ""
-        faculty_card = "'" + str(getattr(faculty_info, "card", "") or "") if faculty_info else ""
+        conductor_name, conductor_phone = _conductor(members)
+        (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(members.get(4, []))
+        meals, remark = _meal_and_remark(item)
         rows.append([
             index,
             getattr(user, "nickname", "") if user else "",
@@ -257,19 +306,18 @@ def admin_data2_rows(reports: Iterable[Report]) -> list[list]:
             item.choir_name or "",
             item.contact_name or "",
             item.contact_phone or "",
-            conduct_name,
-            conduct_phone,
-            conduct_card,
-            faculty_name,
-            faculty_phone,
-            faculty_card,
+            conductor_name,
+            conductor_phone,
+            teacher1_name, teacher1_phone, teacher2_name, teacher2_phone,
             item.establishment or "",
             item.group or "",
             item.name1 or "",
             item.name or "",
-            seconds_to_human(item.time_length),
+            _headcount(members.get(0, []), members.get(1, [])),
             *(str(instrument_counts[key]) for key in INSTRUMENTS),
             sum(instrument_counts.values()),
+            remark,
+            meals,
         ])
     return rows
 
@@ -355,12 +403,12 @@ def reports_export_response(reports: Iterable[Report], filename: str = "数据�
     return workbook_response([("数据导出", report_data_rows(reports))], filename)
 
 
-def admin_data1_response(reports: Iterable[Report], filename: str = "数据导出.xlsx") -> HttpResponse:
-    return workbook_response([("数据导出", admin_data1_rows(reports))], filename)
+def admin_data1_response(reports: Iterable[Report], filename: str = "报名数据.xlsx") -> HttpResponse:
+    return workbook_response([("报名数据", admin_data1_rows(reports))], filename)
 
 
-def admin_data2_response(reports: Iterable[Report], filename: str = "数据导出.xlsx") -> HttpResponse:
-    return workbook_response([("数据导出", admin_data2_rows(reports))], filename)
+def admin_data2_response(reports: Iterable[Report], filename: str = "器乐统计数据.xlsx") -> HttpResponse:
+    return workbook_response([("器乐统计数据", admin_data2_rows(reports))], filename)
 
 
 DRAW_TYPES = {
