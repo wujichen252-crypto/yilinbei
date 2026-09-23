@@ -43,8 +43,8 @@ class RegistrationFormContextTests(ApiTestCase):
 
         # school_name 为空时回退 User.nickname
         self.assertEqual(ctx["school"], "某某中学")
-        self.assertEqual(ctx["type_line"], "管乐团■　铜管乐团□")
-        self.assertEqual(ctx["group_line"], "小学组□　中学组□　大学组■")
+        self.assertEqual(ctx["type_line"], "管乐团■　　铜管乐团□")
+        self.assertEqual(ctx["group_line"], "小学组□　　中学组□　　大学组■")
         self.assertEqual(ctx["assigned_song"], "指定曲目A")
         self.assertEqual(ctx["optional_song"], "自选曲目B")
         self.assertEqual(ctx["headcount"], "正式队员 1 人，预备队员 1 人")
@@ -107,7 +107,8 @@ class ExportReportEndpointTests(ApiTestCase):
         self.assertEqual(result["Content-Type"], "application/pdf")
         self.assertIn("报名信息表.pdf", decode_disposition(result["Content-Disposition"]))
         self.assertTrue(result.content.startswith(b"%PDF-"))
-        self.assertIn(b"STSong-Light", result.content)
+        # 有内嵌/引用的字体对象即可（Windows 上是仿宋等 TTF 子集，缺失时回退 STSong-Light）
+        self.assertIn(b"/Type /Font", result.content)
 
     def test_requires_auth(self):
         self.clear_authorization()

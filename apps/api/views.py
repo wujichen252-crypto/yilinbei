@@ -123,7 +123,9 @@ def create_report(request, province=False):
     with transaction.atomic():
         lock_user_slot(user.id)
         try:
-            assert_report_quota(user, scope)
+            # 按组别计配额（每校每个组别一支）：小学组、中学组可各报一支。
+            # 见 assert_report_quota 与 HaveToRead.vue 的【2026-09-23 口径变更】。
+            assert_report_quota(user, scope, data.get("group"))
         except ReportQuotaExceeded as exc:
             transaction.set_rollback(True)
             return response(failure(exc.message))
@@ -650,6 +652,26 @@ def admin_export_data2(request):
         return err
     write_log(request.auth, 6, "管理员导出数据2")
     return admin_data2_response(Report.objects.all().order_by("id"))
+
+
+@api.get("/committee/export/data", auth=auth)
+def committee_export_data(request):
+    """组委会按组导出整组报名。
+
+    数据范围以原版 ``Api\\ExportController::exportReportData`` 为基准：只按可选
+    ``group`` 过滤、``id`` 升序、无 ``user_id``/状态条件，输出同一套 19 列。
+    原版该接口只挂了 ``auth:sanctum``（``routes/api.php:58-62``，无角色中间件），
+    组委会是借它做整组导出的；本接口补上原版缺失的角色门禁（``type=2``），
+    从而把"整组导出"与 ``/export/data`` 的"仅本人导出"分开，两个数据范围互不干扰。
+    """
+    err = role_error(request, 2)
+    if err:
+        return err
+    qs = Report.objects.all().order_by("id")
+    if request.GET.get("group"):
+        qs = qs.filter(group=request.GET["group"])
+    write_log(request.auth, 6, "导出报送数据")
+    return reports_export_response(qs, "数据导出.xlsx")
 
 
 @api.get("/committee/index/total", auth=auth)

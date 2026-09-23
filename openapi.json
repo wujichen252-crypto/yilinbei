@@ -197,6 +197,7 @@
             "description": "OK"
           }
         },
+        "description": "参演人员信息表：按 Laravel ExportController::exportReportPerson 的实际输出复刻。",
         "security": [
           {
             "BearerAuth": []
@@ -817,6 +818,24 @@
         ]
       }
     },
+    "/api/committee/export/data": {
+      "get": {
+        "operationId": "apps_api_views_committee_export_data",
+        "summary": "Committee Export Data",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "description": "组委会按组导出整组报名。\n\n数据范围以原版 ``Api\\ExportController::exportReportData`` 为基准：只按可选\n``group`` 过滤、``id`` 升序、无 ``user_id``/状态条件，输出同一套 19 列。\n原版该接口只挂了 ``auth:sanctum``（``routes/api.php:58-62``，无角色中间件），\n组委会是借它做整组导出的；本接口补上原版缺失的角色门禁（``type=2``），\n从而把\"整组导出\"与 ``/export/data`` 的\"仅本人导出\"分开，两个数据范围互不干扰。",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/committee/index/total": {
       "get": {
         "operationId": "apps_api_views_committee_total",
@@ -1036,6 +1055,282 @@
         "operationId": "apps_api_views_province_percent",
         "summary": "Province Percent",
         "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/drafts": {
+      "post": {
+        "operationId": "city_draft_create",
+        "summary": " Draft Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "city_draft_list",
+        "summary": " Draft List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/drafts/{draft_id}": {
+      "put": {
+        "operationId": "city_draft_update",
+        "summary": " Draft Update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "city_draft_get",
+        "summary": " Draft Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/drafts/{draft_id}/submit": {
+      "post": {
+        "operationId": "city_draft_submit",
+        "summary": " Draft Submit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/reports/{report_id}/edit-draft": {
+      "post": {
+        "operationId": "city_report_edit_draft",
+        "summary": " Edit Draft",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "schema": {
+              "title": "Report Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/drafts": {
+      "post": {
+        "operationId": "school_draft_create",
+        "summary": " Draft Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "school_draft_list",
+        "summary": " Draft List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/drafts/{draft_id}": {
+      "put": {
+        "operationId": "school_draft_update",
+        "summary": " Draft Update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "school_draft_get",
+        "summary": " Draft Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/drafts/{draft_id}/submit": {
+      "post": {
+        "operationId": "school_draft_submit",
+        "summary": " Draft Submit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/reports/{report_id}/edit-draft": {
+      "post": {
+        "operationId": "school_report_edit_draft",
+        "summary": " Edit Draft",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "schema": {
+              "title": "Report Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
