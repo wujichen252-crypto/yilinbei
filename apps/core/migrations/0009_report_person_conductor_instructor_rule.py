@@ -171,7 +171,7 @@ def drop_rule(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("core", "0006_reportdraft_unique_editing"),
+        ("core", "0008_alter_person_card"),
     ]
 
     operations = [
