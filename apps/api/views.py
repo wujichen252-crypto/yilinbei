@@ -632,6 +632,26 @@ def admin_export_data2(request):
     return admin_data2_response(Report.objects.all().order_by("id"))
 
 
+@api.get("/committee/export/data", auth=auth)
+def committee_export_data(request):
+    """组委会按组导出整组报名。
+
+    数据范围以原版 ``Api\\ExportController::exportReportData`` 为基准：只按可选
+    ``group`` 过滤、``id`` 升序、无 ``user_id``/状态条件，输出同一套 19 列。
+    原版该接口只挂了 ``auth:sanctum``（``routes/api.php:58-62``，无角色中间件），
+    组委会是借它做整组导出的；本接口补上原版缺失的角色门禁（``type=2``），
+    从而把"整组导出"与 ``/export/data`` 的"仅本人导出"分开，两个数据范围互不干扰。
+    """
+    err = role_error(request, 2)
+    if err:
+        return err
+    qs = Report.objects.all().order_by("id")
+    if request.GET.get("group"):
+        qs = qs.filter(group=request.GET["group"])
+    write_log(request.auth, 6, "导出报送数据")
+    return reports_export_response(qs, "数据导出.xlsx")
+
+
 @api.get("/committee/index/total", auth=auth)
 def committee_total(request):
     err = role_error(request, 2); return err or response(success("获取成功！", stats_admin(request)))
