@@ -6,20 +6,18 @@
 
 数据映射沿用 /api/export/report 原有口径：ReportPerson.position 0=正式队员、
 1=预备队员、2=指挥、4=指导老师；乐器名经 _instrument_bucket 归一到官方表格
-的栏目。reportlab 缺失时降级为 CSV 文本（与 views.pdf_response 一致）。
+的 17 个栏目（含长号）。reportlab 缺失时降级为 CSV 文本（与 views.pdf_response 一致）。
 """
 import io
 import os
 
 from django.http import HttpResponse
 
-# 附件2（0921 定稿通知 docx）正式队员名单的 17 个乐器栏目，顺序与原文一致；
-# 不在表内的乐器名归入"其他"
-FORM_INSTRUMENTS = (
-    "短笛", "长笛", "单簧管", "低音单簧管", "中音萨克斯", "次中音萨克斯",
-    "上低音萨克斯", "双簧管", "大管", "小号", "长号", "圆号",
-    "上低音号", "大号", "打击乐", "低音大提琴", "其他",
-)
+from apps.api.export_services import INSTRUMENTS
+
+# 附件2 正式队员名单的 17 个乐器栏目；与 export_services.INSTRUMENTS 同源，
+# 顺序为红头文件原文。表外乐器（如"次中音号"）仍由 _instrument_bucket 归到"其他"。
+FORM_INSTRUMENTS = INSTRUMENTS
 MEALS = ("11月20日午餐", "11月20日晚餐", "11月21日午餐", "11月21日晚餐",
          "11月22日午餐", "11月22日晚餐")
 # 表头展示用固定换行（日期一行、"午餐/晚餐"一行），匹配数据仍用 MEALS
@@ -158,7 +156,7 @@ def form_context(report):
     for person in formal:
         bucket = _instrument_bucket(getattr(person, "instrument", ""))
         if bucket not in instrument_names:
-            bucket = "其他"  # 不在附件2 表内的乐器名统一并入"其他"栏
+            bucket = "其他"  # 表外乐器（如次中音号）统一并入"其他"栏
         instrument_names[bucket].append(_person_name(person))
 
     remark_parts = [str(report.remark or "")]

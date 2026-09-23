@@ -2,7 +2,9 @@ import json
 import re
 import secrets
 from datetime import datetime
+from urllib.parse import urlsplit
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -22,12 +24,19 @@ def page_response(items, count, msg="", code=0):
     return {"data": items, "count": count, "code": code, "msg": msg}
 
 
+class BodyError(Exception):
+    """请求体是合法 JSON 但不是对象（如 "abc"、[1,2]、3）。views 层负责回 400。"""
+
+
 def parse_body(request):
     if request.body:
         try:
-            return json.loads(request.body.decode("utf-8"))
+            value = json.loads(request.body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            pass
+            return request.POST.dict()
+        if not isinstance(value, dict):
+            raise BodyError("请求体必须是 JSON 对象")
+        return value
     return request.POST.dict()
 
 
@@ -72,6 +81,55 @@ def write_log(user, action_type, content):
     Logs.objects.create(user_id=user.id if user else 1, type=action_type, content=str(content)[:5000])
 
 
+def _configured_person_head_hosts():
+    """Return normalized exact hosts and explicitly delegated subdomains."""
+    configured = list(getattr(settings, "PERSON_HEAD_ALLOWED_DOMAINS", []))
+    configured += list(getattr(settings, "PERSON_HEAD_CDN_DOMAINS", []))
+    configured += [getattr(settings, "QINIU_DOMAIN", ""), getattr(settings, "ALIYUN_OSS_HOST", "")]
+    endpoint = getattr(settings, "ALIYUN_OSS_ENDPOINT", "")
+    bucket = getattr(settings, "ALIYUN_OSS_BUCKET", "")
+    if endpoint and bucket:
+        configured.append(f"{bucket}.{endpoint}")
+
+    exact = set()
+    subdomains = set()
+    for value in configured:
+        raw = str(value or "").strip().rstrip("/")
+        if not raw:
+            continue
+        parsed = urlsplit(raw if "://" in raw else f"//{raw}")
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if not host:
+            continue
+        if raw.startswith("."):
+            subdomains.add(host.lstrip("."))
+        else:
+            exact.add(host)
+    return exact, subdomains
+
+
+def valid_person_head(value):
+    """Allow no avatar, or an HTTP(S) URL hosted by configured OSS/CDN hosts."""
+    if value in (None, ""):
+        return True
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    if not value:
+        return True
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return False
+    exact, subdomains = _configured_person_head_hosts()
+    host = parsed.hostname.lower().rstrip(".")
+    return host in exact or any(host == domain or host.endswith("." + domain)
+                                for domain in subdomains)
+
+
+def _person_head_error(value):
+    return None if valid_person_head(value) else "头像地址必须为空，且只能使用已配置 OSS/CDN 域名的 http/https 地址"
+
+
 @transaction.atomic
 def store_people(user, people):
     people = people or []
@@ -91,6 +149,9 @@ def store_people(user, people):
         name = str(item.get("name", "")).strip()
         if not card or not name:
             return False, "身份证和姓名不能为空"
+        head_error = _person_head_error(item.get("head"))
+        if head_error:
+            return False, head_error
         if card in names_by_card and names_by_card[card] != name:
             return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
         names_by_card[card] = name
@@ -108,7 +169,14 @@ def store_people(user, people):
         values.pop("position", None)
         values.pop("type", None)
         values.pop("id", None)
-        values["user_id"] = getattr(user, "id", user)
+        if person:
+            # A global card record belongs to its established identity. A later
+            # report may refresh optional profile data, but cannot blank or
+            # reassign the non-empty identity fields.
+            values.pop("name", None)
+            values.pop("user_id", None)
+        else:
+            values["user_id"] = getattr(user, "id", user)
         if person:
             for key in {f.name for f in Person._meta.fields}:
                 if key in values:

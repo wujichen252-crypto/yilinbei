@@ -114,6 +114,11 @@ QINIU_ACCESS_KEY = os.getenv("QINIU_ACCESS_KEY", "")
 QINIU_SECRET_KEY = os.getenv("QINIU_SECRET_KEY", "")
 QINIU_BUCKET = os.getenv("QINIU_BUCKET", "")
 QINIU_DOMAIN = os.getenv("QINIU_DOMAIN", "")
+# Comma-separated hostnames allowed for Person.head URLs. OSS and Qiniu/CDN
+# settings below are also considered by the application-level validator.
+PERSON_HEAD_ALLOWED_DOMAINS = [
+    x.strip() for x in os.getenv("PERSON_HEAD_ALLOWED_DOMAINS", "").split(",") if x.strip()
+]
 
 # --- 阿里云 OSS（STS 直传，见 apps/api/views.py 的 oss_token）---
 # 长期密钥只存后端环境变量，前端只拿 AssumeRole 签发的短期凭证。
@@ -125,6 +130,11 @@ ALIYUN_OSS_ENDPOINT = os.getenv("ALIYUN_OSS_ENDPOINT", "oss-cn-chengdu.aliyuncs.
 ALIYUN_OSS_HOST = os.getenv("ALIYUN_OSS_HOST", "")  # 对外访问域名，前端拼 URL 用；留空则按 bucket+endpoint 推导
 ALIYUN_OSS_STS_ROLE_ARN = os.getenv("ALIYUN_OSS_STS_ROLE_ARN", "")
 ALIYUN_OSS_STS_EXPIRE = int(os.getenv("ALIYUN_OSS_STS_EXPIRE", "3600"))
+
+# Optional additional public hostnames, such as a CDN in front of OSS.
+PERSON_HEAD_CDN_DOMAINS = [
+    x.strip() for x in os.getenv("PERSON_HEAD_CDN_DOMAINS", "").split(",") if x.strip()
+]
 
 TOKEN_TTL_HOURS = int(os.getenv("TOKEN_TTL_HOURS", "4"))
 
