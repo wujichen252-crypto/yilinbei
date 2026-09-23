@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import F, Q
 from django.core.exceptions import ValidationError
 from django.http import HttpResponse, JsonResponse
@@ -27,17 +27,19 @@ from apps.core.models import (Crew, Draw, Files, Leader, LiveReport, Logs,
                               TicketSubscribe, User)
 from apps.core.report_drafts import (
     DraftError, DraftIntegrityError, DraftNotFound, DraftConflict,
-    ReportNotRejected,
-    SubmissionError, build_payload_from_report, create_or_get_draft,
-    create_report_from_submission, decode_payload, draft_summary,
-    encode_payload, normalize_draft_payload, parse_submission_payload,
+    ReportNotRejected, ReportQuotaExceeded,
+    SubmissionError, assert_report_quota, build_payload_from_report,
+    create_or_get_draft, create_report_from_submission, decode_payload,
+    draft_summary, encode_payload, lock_user_slot,
+    normalize_draft_payload, parse_submission_payload,
     update_draft, update_rejected_report_from_submission,
 )
-from apps.core.services import (attach_report_people, failure, list_page,
-                                live_report_dict, model_dict, new_code,
-                                parse_body, report_dict, store_people,
-                                success, user_dict, valid_person_head,
-                                verify_user_password, write_log)
+from apps.core.services import (BodyError, attach_report_people, failure,
+                                list_page, live_report_dict, model_dict,
+                                new_code, parse_body, report_dict,
+                                store_people, success, user_dict,
+                                valid_person_head, verify_user_password,
+                                write_log)
 
 from .auth import BearerAuth
 from .export_services import (
@@ -57,6 +59,13 @@ auth = BearerAuth()
 
 def response(data, status=200):
     return JsonResponse(data, safe=True, status=status)
+
+
+@api.exception_handler(BodyError)
+def _body_error(request, exc):
+    # 合法 JSON 但非对象（如 "abc"、[1,2]、3）：回 400 而不是让 .get 抛 500
+    return response({"code": "INVALID_BODY", "msg": str(exc) or "请求体必须是 JSON 对象",
+                     "data": None}, 400)
 
 
 def body(request):
@@ -109,10 +118,15 @@ def report_page(request, current_user=None, descending=False):
 def create_report(request, province=False):
     user = request.auth
     data = body(request)
-    if province and Report.objects.filter(user_id=user.id).count() >= 8:
-        return response(failure("目前您的单位已超报送限制,无法再继续进行报送!"))
+    scope = 4 if province else user.type
     people = data.get("person", [])
     with transaction.atomic():
+        lock_user_slot(user.id)
+        try:
+            assert_report_quota(user, scope)
+        except ReportQuotaExceeded as exc:
+            transaction.set_rollback(True)
+            return response(failure(exc.message))
         ok, stored = store_people(user, people)
         if not ok:
             transaction.set_rollback(True)
@@ -393,7 +407,8 @@ def export_person(request):
 
 @api.get("/export/data", auth=auth)
 def export_data(request):
-    qs = Report.objects.all().order_by("id")
+    # 仅导出本账号名下的报名；组委会需要全量导出请走 /admin/export/data1|data2
+    qs = Report.objects.filter(user_id=request.auth.id).order_by("id")
     if request.GET.get("group"):
         qs = qs.filter(group=request.GET["group"])
     write_log(request.auth, 6, "导出报送数据")
@@ -772,6 +787,7 @@ def register_draft_routes(prefix, expected, scope):
             return err
         try:
             draft = create_or_get_draft(request.auth, scope, _draft_payload_body(request))
+            write_log(request.auth, 2, "暂存报名草稿 draft_id=%s" % draft.id)
             return response(success("暂存成功", draft_summary(draft)))
         except DraftError as exc:
             return _draft_error_response(exc)
@@ -829,6 +845,9 @@ def register_draft_routes(prefix, expected, scope):
             if isinstance(version, bool) or not isinstance(version, int) or version < 1:
                 raise DraftError("version 必须是正整数")
             with transaction.atomic():
+                # 先锁 user，再锁 draft：与 create_report 保持一致的锁顺序，
+                # 防止两个不同草稿并发提交时突破每校限报（P0-3）。
+                lock_user_slot(request.auth.id)
                 draft = ReportDraft.objects.select_for_update().filter(
                     id=draft_id, user_id=request.auth.id, scope=scope).first()
                 if not draft:
@@ -857,10 +876,11 @@ def register_draft_routes(prefix, expected, scope):
                 draft.submitted_at = timezone.now()
                 draft.updated_at = timezone.now()
                 draft.save(update_fields=["report_id", "state", "submitted_at", "updated_at"])
-                return response(success("提交成功", {
-                    **draft_summary(draft), "report_id": str(report.id),
-                    "report_status": report.status,
-                }))
+            write_log(request.auth, 2, "提交报名 report_id=%s" % report.id)
+            return response(success("提交成功", {
+                **draft_summary(draft), "report_id": str(report.id),
+                "report_status": report.status,
+            }))
         except DraftError as exc:
             return _draft_error_response(exc)
         except (ValueError, ValidationError) as exc:
@@ -882,23 +902,34 @@ def register_draft_routes(prefix, expected, scope):
                     raise ReportNotRejected("当前报名不是驳回状态")
                 draft = ReportDraft.objects.select_for_update().filter(
                     report_id=report.id, user_id=request.auth.id, scope=scope).first()
+                if draft is not None and draft.state == ReportDraft.STATE_EDITING:
+                    # 已有编辑中草稿：直接返回，不用报名内容覆盖用户已暂存的修改
+                    data = draft_summary(draft)
+                    data["payload"] = decode_payload(draft.payload)
+                    return response(success("进入编辑成功", data))
                 payload = encode_payload(build_payload_from_report(report))
                 if draft is None:
                     draft = ReportDraft.objects.create(
                         user_id=request.auth.id, scope=scope, report_id=report.id,
                         payload=payload, state=ReportDraft.STATE_EDITING)
                 else:
+                    # 已提交过又被再次驳回：从正式报名重新播种，清掉提交痕迹
                     draft.payload = payload
                     draft.state = ReportDraft.STATE_EDITING
+                    draft.submitted_at = None
                     draft.version = F("version") + 1
                     draft.updated_at = timezone.now()
-                    draft.save(update_fields=["payload", "state", "version", "updated_at"])
+                    draft.save(update_fields=["payload", "state", "submitted_at",
+                                              "version", "updated_at"])
                     draft.refresh_from_db()
                 data = draft_summary(draft)
                 data["payload"] = decode_payload(draft.payload)
-                return response(success("进入编辑成功", data))
+            write_log(request.auth, 1, "进入报名编辑 report_id=%s" % report_id)
+            return response(success("进入编辑成功", data))
         except DraftError as exc:
             return _draft_error_response(exc)
+        except IntegrityError:
+            return _draft_error_response(DraftConflict("草稿已在其他页面创建，请刷新"))
 
 
 def register_scope_routes(prefix, expected, province=False):

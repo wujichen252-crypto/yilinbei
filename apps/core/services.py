@@ -24,12 +24,19 @@ def page_response(items, count, msg="", code=0):
     return {"data": items, "count": count, "code": code, "msg": msg}
 
 
+class BodyError(Exception):
+    """请求体是合法 JSON 但不是对象（如 "abc"、[1,2]、3）。views 层负责回 400。"""
+
+
 def parse_body(request):
     if request.body:
         try:
-            return json.loads(request.body.decode("utf-8"))
+            value = json.loads(request.body.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            pass
+            return request.POST.dict()
+        if not isinstance(value, dict):
+            raise BodyError("请求体必须是 JSON 对象")
+        return value
     return request.POST.dict()
 
 

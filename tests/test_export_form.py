@@ -52,16 +52,17 @@ class RegistrationFormContextTests(ApiTestCase):
         self.assertIn("请安排停车", ctx["remark"])
 
     def test_instrument_buckets_match_official_columns(self):
-        # 官方表格 16 栏：上低音萨克斯单列；表外的长号并入"其他"
+        # 官方表格 17 栏：上低音萨克斯与长号均单列；表外乐器（如次中音号）并入"其他"
         self.add_person("甲", 0, instrument="上低音萨克斯")
         self.add_person("乙", 0, instrument="长号")
         self.add_person("丙", 0, instrument="长笛")
+        self.add_person("丁", 0, instrument="次中音号")
         ctx = form_context(self.report)
 
         self.assertIn("上低音萨克斯：甲", ctx["instrument_cells"])
+        self.assertIn("长号：乙", ctx["instrument_cells"])
         self.assertIn("长笛：丙", ctx["instrument_cells"])
-        self.assertIn("其他：乙", ctx["instrument_cells"])
-        self.assertNotIn("长号", "".join(ctx["instrument_cells"]))
+        self.assertIn("其他：丁", ctx["instrument_cells"])
 
     def test_conductor_and_teacher_numbering_with_phones(self):
         self.add_person("王指挥", 2, phone="13900000001")

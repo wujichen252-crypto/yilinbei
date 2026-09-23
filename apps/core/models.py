@@ -232,6 +232,21 @@ class ReportDraft(models.Model):
             ),
             models.Index(fields=["report_id"], name="draft_report_idx"),
         ]
+        # 部分唯一索引：state=0 表示 STATE_EDITING。
+        # 两条分别覆盖"新增报名"（report_id IS NULL）和"编辑被驳回报名"两条业务线，
+        # 应用层锁 + IntegrityError 兜底见 create_or_get_draft / _edit_draft。
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user_id", "scope"],
+                condition=models.Q(state=0, report_id__isnull=True),
+                name="draft_one_new_editing",
+            ),
+            models.UniqueConstraint(
+                fields=["user_id", "scope", "report_id"],
+                condition=models.Q(state=0),
+                name="draft_one_edit_editing",
+            ),
+        ]
 
 
 class Person(models.Model):

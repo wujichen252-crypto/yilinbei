@@ -111,3 +111,87 @@ class DraftApiTests(ApiTestCase):
         self.authorize_as(self.city)
         result = self.client.get("/api/city/report/drafts/%s" % created["draft_id"])
         self.assertEqual(result.status_code, 404)
+
+    # ----- 回归：P0-2 300 字乐团简介应能暂存和提交 -----
+    def test_long_desc_up_to_1000_chars_is_accepted(self):
+        payload = self.payload(desc="简" * 300)
+        created = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+        self.assertEqual(created.status_code, 200)
+        draft_id = created.json()["data"]["draft_id"]
+        submit = self.json_request(
+            "post", "/api/school/report/drafts/%s/submit" % draft_id,
+            {"version": 1})
+        self.assertEqual(submit.status_code, 200)
+        self.assertEqual(Report.objects.get().desc, "简" * 300)
+
+    def test_desc_over_1000_chars_is_rejected(self):
+        payload = self.payload(desc="简" * 1001)
+        result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+        self.assertEqual(result.status_code, 400)
+
+    # ----- 回归：P0-1 新增页不得覆盖 edit-draft 绑定的正式报名 -----
+    def test_new_draft_does_not_touch_edit_draft(self):
+        # 先造一份被驳回的正式报名，走 edit-draft 绑定草稿
+        report = self.make_report(self.school, status=-1, name="原报名名称")
+        edit = self.json_request(
+            "post", "/api/school/reports/%s/edit-draft" % report.id, {})
+        self.assertEqual(edit.status_code, 200)
+        edit_draft_id = edit.json()["data"]["draft_id"]
+
+        # 再从新增页 POST 一份全新内容
+        result = self.json_request("post", "/api/school/report/drafts", {
+            "payload": self.payload(name="全新报名")
+        })
+        self.assertEqual(result.status_code, 200)
+        new_draft_id = result.json()["data"]["draft_id"]
+
+        # 两条草稿必须是不同的行；原报名和 edit-draft 都不受影响
+        self.assertNotEqual(edit_draft_id, new_draft_id)
+        report.refresh_from_db()
+        self.assertEqual(report.name, "原报名名称")
+        edit_draft = ReportDraft.objects.get(pk=int(edit_draft_id))
+        self.assertEqual(edit_draft.report_id, report.id)
+        new_draft = ReportDraft.objects.get(pk=int(new_draft_id))
+        self.assertIsNone(new_draft.report_id)
+
+    # ----- 回归：P1-1 重复进入 edit-draft 不得冲掉用户暂存 -----
+    def test_edit_draft_preserves_user_edits_on_second_entry(self):
+        report = self.make_report(self.school, status=-1, name="原报名名称")
+        first = self.json_request(
+            "post", "/api/school/reports/%s/edit-draft" % report.id, {})
+        self.assertEqual(first.status_code, 200)
+        draft_id = first.json()["data"]["draft_id"]
+        version = first.json()["data"]["version"]
+        # 用户改了一半（PUT 更新草稿）
+        self.json_request(
+            "put", "/api/school/report/drafts/%s" % draft_id,
+            {"version": version, "payload": self.payload(name="用户改了一半")})
+        # 再点一次「修改报名」
+        second = self.json_request(
+            "post", "/api/school/reports/%s/edit-draft" % report.id, {})
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()["data"]["draft_id"], draft_id)
+        self.assertEqual(second.json()["data"]["payload"]["name"], "用户改了一半")
+
+    # ----- 回归：P0-3 每校限报一支，草稿提交路径也应拦住 -----
+    def test_draft_submit_rejects_second_report_for_same_school(self):
+        self.make_report(self.school, status=0)
+        created = self.json_request("post", "/api/school/report/drafts", {
+            "payload": self.payload()
+        }).json()["data"]
+        submit = self.json_request(
+            "post", "/api/school/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"]})
+        self.assertEqual(submit.status_code, 409)
+        self.assertEqual(submit.json().get("code"), "REPORT_QUOTA_EXCEEDED")
+        self.assertEqual(Report.objects.count(), 1)
+
+    # ----- 回归：P2-2 非对象 JSON body 应回 400 -----
+    def test_non_object_json_body_returns_400(self):
+        for bad_body in ('"abc"', '[1, 2, 3]', '3'):
+            result = self.client.post(
+                "/api/school/report/drafts",
+                data=bad_body,
+                content_type="application/json",
+            )
+            self.assertEqual(result.status_code, 400, "body=%s" % bad_body)

@@ -7,8 +7,15 @@ from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
-from .models import Files, Person, Report, ReportDraft, ReportPerson
+from .models import Files, Person, Report, ReportDraft, ReportPerson, User
 from .services import attach_report_people, store_people
+
+# 每所学校/单位可持有的（未删除）正式报名数上限；按 scope 分档：
+#   0 = 校级、1 = 市级、4 = 省级（历史 create_report 里的 "8" 沿用）。
+# 规则口径：驳回态（status=-1）与待审核态（status=0）同样占额度，
+# 只有软删除后才腾出名额，与 Report.objects（SoftDeleteManager）一致。
+REPORT_QUOTA_BY_SCOPE = {0: 1, 1: 1, 4: 8}
+DEFAULT_REPORT_QUOTA = 1
 
 REPORT_FIELDS = {
     "choir_name", "name", "name1", "school_name", "desc", "group",
@@ -20,6 +27,9 @@ SERVER_FIELDS = {"user_id", "scope", "status", "report_id", "draft_id", "version
                  "created_at", "updated_at", "submitted_at"}
 PERSON_FIELDS = {"id", "name", "card", "age", "school", "phone", "gender",
                  "major", "head", "instrument", "other", "remark", "position", "type"}
+
+# 单字段上限，与 Report 各列 max_length 对齐；未列出的字段沿用 255（大部分列宽）
+_FIELD_LIMITS = {"desc": 1000}
 
 
 class DraftError(Exception):
@@ -58,6 +68,30 @@ class SubmissionError(InvalidSubmission):
 class DraftIntegrityError(DraftError):
     code = "DRAFT_DATA_INTEGRITY_ERROR"
     status = 409
+
+
+class ReportQuotaExceeded(DraftError):
+    code = "REPORT_QUOTA_EXCEEDED"
+    status = 409
+
+
+def lock_user_slot(user_id):
+    """在事务内串行化同一用户的正式报名创建。SQLite 下退化为普通 SELECT。
+
+    必须在 assert_report_quota 之前调用。使用 all_objects 以便即使账号
+    被软删也能锁住那一行（正常业务不会走到，但避免 select_for_update() 空手）。
+    """
+    return User.all_objects.select_for_update().filter(pk=user_id).first()
+
+
+def assert_report_quota(user, scope):
+    """必须在 lock_user_slot 之后、同一事务内调用。"""
+    limit = REPORT_QUOTA_BY_SCOPE.get(scope, DEFAULT_REPORT_QUOTA)
+    current = Report.objects.filter(user_id=user.id).count()
+    if current >= limit:
+        message = ("每所学校限报一支队伍，您已有报名记录" if limit == 1
+                   else "目前您的单位已超报送限制,无法再继续进行报送!")
+        raise ReportQuotaExceeded(message)
 
 
 @dataclass(frozen=True)
@@ -156,7 +190,7 @@ def normalize_draft_payload(raw):
                 raise DraftError("dinner_reservation 必须是数组或对象")
             result[field] = value
         else:
-            result[field] = _string(value, field)
+            result[field] = _string(value, field, maximum=_FIELD_LIMITS.get(field, 255))
     people = raw.get("person", [])
     if not isinstance(people, list):
         raise DraftError("person 必须是数组")
@@ -168,7 +202,8 @@ def parse_submission_payload(raw, user_id, scope=None):
     value = normalize_draft_payload(raw)
     required = ("choir_name", "name", "group", "establishment", "contact_name", "contact_phone")
     for field in required:
-        value[field] = _string(value.get(field), field, True)
+        value[field] = _string(value.get(field), field, True,
+                               maximum=_FIELD_LIMITS.get(field, 255))
     if value.get("time_length") is None:
         raise InvalidSubmission("time_length 不能为空")
     if value["time_length"] <= 0:
@@ -204,6 +239,14 @@ def payload_from_report(report):
 
 
 def create_report_from_submission(user, submission, scope=None):
+    """从提交草稿创建正式 Report。
+
+    在同一事务内先锁 user 行、再校验配额，保证并发下不会突破每校/每省限报。
+    调用方（_draft_submit）已包在 transaction.atomic() 中；这里的 lock 复用
+    外层事务，SQLite 下 select_for_update() 是空操作，属于验证盲区（见 P2-5）。
+    """
+    lock_user_slot(user.id)
+    assert_report_quota(user, scope)
     ok, stored = store_people(user, list(submission.people))
     if not ok:
         raise InvalidSubmission(stored)
@@ -227,19 +270,30 @@ def update_rejected_report_from_submission(user, report, submission, scope=None)
 
 
 def create_or_get_draft(user, scope, raw):
+    """新增报名的暂存：只认 report_id IS NULL 的编辑中草稿。
+
+    绑定在具体 Report 上的 edit-draft 草稿不会被这里复用/覆盖——那两条业务线
+    共用一张表但表意不同，混用会静默改写被驳回的正式报名（历史 P0）。
+    """
     normalized = normalize_draft_payload(raw)
     payload = encode_payload(normalized)
-    with transaction.atomic():
-        draft = ReportDraft.objects.select_for_update().filter(
-            user_id=user.id, scope=scope, state=ReportDraft.STATE_EDITING
-        ).order_by("id").first()
-        if draft is None:
-            return ReportDraft.objects.create(user_id=user.id, scope=scope, payload=payload)
-        draft.payload = payload
-        draft.version += 1
-        draft.updated_at = timezone.now()
-        draft.save(update_fields=["payload", "version", "updated_at"])
-        return draft
+    from django.db import IntegrityError
+    try:
+        with transaction.atomic():
+            draft = ReportDraft.objects.select_for_update().filter(
+                user_id=user.id, scope=scope, state=ReportDraft.STATE_EDITING,
+                report_id__isnull=True,
+            ).order_by("id").first()
+            if draft is None:
+                return ReportDraft.objects.create(user_id=user.id, scope=scope, payload=payload)
+            draft.payload = payload
+            draft.version += 1
+            draft.updated_at = timezone.now()
+            draft.save(update_fields=["payload", "version", "updated_at"])
+            return draft
+    except IntegrityError:
+        # 并发下另一请求先插入了同一 (user,scope,new) 槽位——让前端重新拉草稿
+        raise DraftConflict("草稿已在其他页面创建，请刷新")
 
 
 def update_draft(user, scope, draft_id, version, raw):
