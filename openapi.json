@@ -197,6 +197,7 @@
             "description": "OK"
           }
         },
+        "description": "参演人员信息表：按 Laravel ExportController::exportReportPerson 的实际输出复刻。",
         "security": [
           {
             "BearerAuth": []
@@ -1036,6 +1037,282 @@
         "operationId": "apps_api_views_province_percent",
         "summary": "Province Percent",
         "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/drafts": {
+      "post": {
+        "operationId": "city_draft_create",
+        "summary": " Draft Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "city_draft_list",
+        "summary": " Draft List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/drafts/{draft_id}": {
+      "put": {
+        "operationId": "city_draft_update",
+        "summary": " Draft Update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "city_draft_get",
+        "summary": " Draft Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/drafts/{draft_id}/submit": {
+      "post": {
+        "operationId": "city_draft_submit",
+        "summary": " Draft Submit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/reports/{report_id}/edit-draft": {
+      "post": {
+        "operationId": "city_report_edit_draft",
+        "summary": " Edit Draft",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "schema": {
+              "title": "Report Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/drafts": {
+      "post": {
+        "operationId": "school_draft_create",
+        "summary": " Draft Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "school_draft_list",
+        "summary": " Draft List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/drafts/{draft_id}": {
+      "put": {
+        "operationId": "school_draft_update",
+        "summary": " Draft Update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "school_draft_get",
+        "summary": " Draft Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/report/drafts/{draft_id}/submit": {
+      "post": {
+        "operationId": "school_draft_submit",
+        "summary": " Draft Submit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/school/reports/{report_id}/edit-draft": {
+      "post": {
+        "operationId": "school_report_edit_draft",
+        "summary": " Edit Draft",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "schema": {
+              "title": "Report Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
