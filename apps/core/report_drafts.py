@@ -84,13 +84,35 @@ def lock_user_slot(user_id):
     return User.all_objects.select_for_update().filter(pk=user_id).first()
 
 
-def assert_report_quota(user, scope):
-    """必须在 lock_user_slot 之后、同一事务内调用。"""
+def assert_report_quota(user, scope, group=None):
+    """必须在 lock_user_slot 之后、同一事务内调用。
+
+    【配额的单位是「组别」，不是「账号」】
+    口径依据（不是推测，是仓库里已有的书面口径）：
+    `src/components/common/HaveToRead.vue` §二段 2 的【2026-09-23 口径变更】写得很明确 ——
+    红头文件原文是「每所学校限报一支队伍，且只能参加一个组别」，组委会后来**放宽**为
+    「每所学校**每个组别**限报一支队伍，小学组、中学组可各报一支（最多两支），
+      大学组限报一支」。同一段还要求本函数与该节**必须同步**。
+
+    原先这里只按 user_id 计数、完全不看 group，于是同一所学校报完中学组就再也报不了
+    小学组 —— 页面承诺「可各报一支」，系统却回
+    `REPORT_QUOTA_EXCEEDED 每所学校限报一支队伍，您已有报名记录`，两边对不上。
+
+    group 取不到时退回账号级计数（宁严不松，不会凭空多放行一支）。
+    """
     limit = REPORT_QUOTA_BY_SCOPE.get(scope, DEFAULT_REPORT_QUOTA)
-    current = Report.objects.filter(user_id=user.id).count()
+    queryset = Report.objects.filter(user_id=user.id)
+    if group:
+        queryset = queryset.filter(group=group)
+    current = queryset.count()
     if current >= limit:
-        message = ("每所学校限报一支队伍，您已有报名记录" if limit == 1
-                   else "目前您的单位已超报送限制,无法再继续进行报送!")
+        if limit != 1:
+            message = "目前您的单位已超报送限制,无法再继续进行报送!"
+        elif group:
+            # 点明是哪个组别满了 —— 只说「限报一支」正是用户被误导的原因
+            message = "%s每所学校限报一支队伍，您已有报名记录" % group
+        else:
+            message = "每所学校限报一支队伍，您已有报名记录"
         raise ReportQuotaExceeded(message)
 
 
@@ -246,7 +268,8 @@ def create_report_from_submission(user, submission, scope=None):
     外层事务，SQLite 下 select_for_update() 是空操作，属于验证盲区（见 P2-5）。
     """
     lock_user_slot(user.id)
-    assert_report_quota(user, scope)
+    # 按组别计配额（每校每个组别一支），见 assert_report_quota 的说明
+    assert_report_quota(user, scope, submission.report.get("group"))
     ok, stored = store_people(user, list(submission.people))
     if not ok:
         raise InvalidSubmission(stored)

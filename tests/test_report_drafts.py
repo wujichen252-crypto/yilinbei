@@ -186,6 +186,37 @@ class DraftApiTests(ApiTestCase):
         self.assertEqual(submit.json().get("code"), "REPORT_QUOTA_EXCEEDED")
         self.assertEqual(Report.objects.count(), 1)
 
+    # ----- 回归：配额的单位是「组别」不是「账号」，小学组与中学组可各报一支 -----
+    # 口径依据：src/components/common/HaveToRead.vue §二段 2 的【2026-09-23 口径变更】——
+    # 「每所学校每个组别限报一支，小学组、中学组可各报一支（最多两支），大学组限报一支」。
+    # 修复前 assert_report_quota 只按 user_id 计数，导致报完中学组的学校再也报不了小学组
+    # （用户实际遇到：提交小学组草稿被拒，msg=「每所学校限报一支队伍，您已有报名记录」）。
+    def test_city_can_submit_one_report_per_group(self):
+        self.make_report(self.city, status=0, group="中学组")
+        self.authorize_as(self.city)
+
+        # 已有中学组一支 → 小学组仍应提交成功（这正是用户报不上来的那条）
+        created = self.json_request("post", "/api/city/report/drafts", {
+            "payload": self.payload(group="小学组")
+        }).json()["data"]
+        first = self.json_request(
+            "post", "/api/city/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"]})
+        self.assertEqual(first.status_code, 200, first.content)
+        self.assertEqual(Report.objects.filter(user_id=self.city.id).count(), 2)
+
+        # 但同一组别的第二支仍要被拦住（额度仍是每「组别」1，没有放开）
+        again = self.json_request("post", "/api/city/report/drafts", {
+            "payload": self.payload(group="小学组")
+        }).json()["data"]
+        second = self.json_request(
+            "post", "/api/city/report/drafts/%s/submit" % again["draft_id"],
+            {"version": again["version"]})
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json().get("code"), "REPORT_QUOTA_EXCEEDED")
+        self.assertIn("小学组", second.json().get("msg", ""))
+        self.assertEqual(Report.objects.filter(user_id=self.city.id).count(), 2)
+
     # ----- 回归：P2-2 非对象 JSON body 应回 400 -----
     def test_non_object_json_body_returns_400(self):
         for bad_body in ('"abc"', '[1, 2, 3]', '3'):

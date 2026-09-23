@@ -123,7 +123,9 @@ def create_report(request, province=False):
     with transaction.atomic():
         lock_user_slot(user.id)
         try:
-            assert_report_quota(user, scope)
+            # 按组别计配额（每校每个组别一支）：小学组、中学组可各报一支。
+            # 见 assert_report_quota 与 HaveToRead.vue 的【2026-09-23 口径变更】。
+            assert_report_quota(user, scope, data.get("group"))
         except ReportQuotaExceeded as exc:
             transaction.set_rollback(True)
             return response(failure(exc.message))
