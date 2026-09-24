@@ -130,15 +130,31 @@ def _person_head_error(value):
     return None if valid_person_head(value) else "头像地址必须为空，且只能使用已配置 OSS/CDN 域名的 http/https 地址"
 
 
+def _person_item_id(item):
+    """提取人员项携带的 id（草稿流是字符串、直改流可能是整数）；无效时返回 None。"""
+    raw = item.get("id")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return int(text) if text.isdigit() else None
+
+
 @transaction.atomic
 def store_people(user, people):
     people = people or []
+    # 带有效 id 的项优先按 id 匹配原记录（编辑场景：原地修正身份证号、姓名等字段，
+    # 不再"改号即新增"）；不带 id 的项沿用"按身份证号查重复用/新建"的旧逻辑。
+    ids = [pid for pid in (_person_item_id(item) for item in people) if pid is not None]
+    existing_by_id = {person.id: person for person in Person.objects.filter(id__in=ids)}
     existing_by_card = {
         person.card: person
         for person in Person.objects.filter(
             card__in=[str(item.get("card", "")).strip() for item in people]
         )
     }
+    items_by_card = {}
+    for item in people:
+        items_by_card.setdefault(str(item.get("card", "")).strip(), []).append(item)
     names_by_card = {}
 
     # Validate the complete batch before performing the first write. This is
@@ -155,34 +171,52 @@ def store_people(user, people):
         if card in names_by_card and names_by_card[card] != name:
             return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
         names_by_card[card] = name
-        existing = existing_by_card.get(card)
-        if existing and existing.name != name:
-            return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
+
+        pid = _person_item_id(item)
+        if pid is not None:
+            person = existing_by_id.get(pid)
+            if person is None:
+                return False, "人员不存在或已被删除，请刷新页面后重新提交"
+            if card != person.card:
+                # 修改了身份证号：新号只要被库中其他人员占用（不论同名与否）一律拒绝，
+                # 杜绝"撞库静默合并/覆盖他人资料"。
+                if Person.objects.filter(card=card).exclude(pk=person.id).exists():
+                    return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
+                # 新号与本批次其他人员（不同 id 或未带 id 的新增项）冲突。
+                for other in items_by_card.get(card, []):
+                    if other is not item and _person_item_id(other) != pid:
+                        return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
+        else:
+            existing = existing_by_card.get(card)
+            if existing and existing.name != name:
+                return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
 
     result = []
     saved_by_card = {}
     for item in people:
         card = str(item.get("card", "")).strip()
-        name = str(item.get("name", "")).strip()
-        person = saved_by_card.get(card) or existing_by_card.get(card)
+        pid = _person_item_id(item)
+        person = existing_by_id.get(pid) if pid is not None else None
+        by_id = person is not None
+        if not by_id:
+            person = saved_by_card.get(card) or existing_by_card.get(card)
         values = dict(item)
         values.pop("position", None)
         values.pop("type", None)
         values.pop("id", None)
         if person:
-            # A global card record belongs to its established identity. A later
-            # report may refresh optional profile data, but cannot blank or
-            # reassign the non-empty identity fields.
-            values.pop("name", None)
+            # 归属（user_id）与创建时间不可被提交数据改写。
             values.pop("user_id", None)
-        else:
-            values["user_id"] = getattr(user, "id", user)
-        if person:
+            if not by_id:
+                # 按 card 复用全局人员库记录（无 id 的新增项）：该记录属于既有身份，
+                # 姓名不可被本次提交改写；按 id 命中的是自己报名里的人员，允许修正姓名。
+                values.pop("name", None)
             for key in {f.name for f in Person._meta.fields}:
                 if key in values:
                     setattr(person, key, values[key])
             person.save()
         else:
+            values["user_id"] = getattr(user, "id", user)
             person = Person.objects.create(**{k: v for k, v in values.items() if k in {
                 f.name for f in Person._meta.fields if f.name != "id"}})
         saved_by_card[card] = person
@@ -191,6 +225,9 @@ def store_people(user, people):
 
 
 def attach_report_people(report_id, result):
+    # 重新提交前本报名的活跃关联人员（软删前留存，供下面清理比对）。
+    old_ids = set(ReportPerson.objects.filter(report_id=report_id)
+                  .values_list("person_id", flat=True))
     ReportPerson.all_objects.filter(report_id=report_id).update(deleted_at=timezone.now())
     links = []
     for item in result:
@@ -201,6 +238,14 @@ def attach_report_people(report_id, result):
             values["person_id"] = values.pop("id")
         links.append(ReportPerson(report_id=report_id, **values))
     ReportPerson.objects.bulk_create(links)
+    # 清理"本次被移除、且不再被任何报名（活跃关联）引用"的人员记录：
+    # Person 是全局人员库（card 唯一），被其他报名引用的人员必须保留。
+    new_ids = {item.get("person_id", item.get("id")) for item in result}
+    for pid in old_ids - new_ids:
+        if pid is None:
+            continue
+        if not ReportPerson.objects.filter(person_id=pid).exists():
+            Person.objects.filter(pk=pid).delete()
 
 
 # Violations of the report_person conductor/instructor rule (migration 0007:
