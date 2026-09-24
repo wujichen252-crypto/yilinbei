@@ -2,7 +2,7 @@ import json
 
 from django.test import TestCase
 
-from apps.core.models import Person, Report, ReportDraft, ReportPerson
+from apps.core.models import Person, Report, ReportDraft, ReportPerson, User
 from apps.core.report_drafts import (REPORT_ALLOWED_GROUPS, DraftError, InvalidSubmission,
                                      assert_group_allowed, decode_payload, encode_payload,
                                      normalize_draft_payload)
@@ -32,7 +32,9 @@ class DraftApiTests(ApiTestCase):
     def setUp(self):
         self.school = self.create_user("draft-school", 0)
         self.other_school = self.create_user("draft-other-school", 0)
+        # 市州端（1）已只读；报名功能移植到中小学端（5）
         self.city = self.create_user("draft-city", 1)
+        self.primary = self.create_user("draft-primary", User.TYPE_PRIMARY_SECONDARY)
         self.authorize_as(self.school)
 
     def payload(self, **overrides):
@@ -107,13 +109,40 @@ class DraftApiTests(ApiTestCase):
         self.assertEqual(Report.objects.count(), 1)
         self.assertEqual(ReportDraft.objects.get().state, ReportDraft.STATE_SUBMITTED)
 
-    def test_city_scope_cannot_access_school_draft(self):
+    def test_primary_scope_cannot_access_school_draft(self):
         created = self.json_request("post", "/api/school/report/drafts", {
             "payload": self.payload()
         }).json()["data"]
-        self.authorize_as(self.city)
-        result = self.client.get("/api/city/report/drafts/%s" % created["draft_id"])
+        self.authorize_as(self.primary)
+        result = self.client.get("/api/primary/report/drafts/%s" % created["draft_id"])
         self.assertEqual(result.status_code, 404)
+
+    # ----- 回归：市州端只读化（2026-09-24），写入端点整体摘除而非 403 -----
+    def test_city_write_routes_are_removed(self):
+        self.authorize_as(self.city)
+        payload = {"payload": self.payload(group="小学组")}
+        self.assertEqual(self.client.get("/api/city/report/drafts/1").status_code, 404)
+        # POST /city/report/drafts 与保留的只读路由 GET /city/report/{id}（无类型
+        # 约束的单段参数）同形，方法不匹配故为 405；同样是「写入端点已不存在」。
+        self.assertEqual(self.json_request("post", "/api/city/report/drafts", payload).status_code, 405)
+        self.assertEqual(self.json_request("put", "/api/city/report/drafts/1", {
+            "version": 1, "payload": self.payload(group="小学组")}).status_code, 404)
+        self.assertEqual(self.client.delete("/api/city/report/delete/1").status_code, 404)
+        self.assertEqual(self.json_request("post", "/api/city/recommend/cau", {}).status_code, 404)
+
+    def test_city_keeps_read_only_endpoints(self):
+        report = self.make_report(self.city, group="小学组")
+        self.authorize_as(self.city)
+        self.assertEqual(self.client.get("/api/city/report/list").status_code, 200)
+        detail = self.client.get("/api/city/report/%s" % report.id)
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["code"], 0)
+        self.assertEqual(self.client.get("/api/city/recommend/list").json()["code"], 0)
+        for route in ("/api/city/index/total", "/api/city/index/percent",
+                      "/api/city/index/establishment"):
+            result = self.client.get(route)
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result.json()["code"], 0)
 
     # ----- 回归：P0-2 300 字乐团简介应能暂存和提交 -----
     def test_long_desc_up_to_1000_chars_is_accepted(self):
@@ -194,58 +223,98 @@ class DraftApiTests(ApiTestCase):
     # 「每所学校每个组别限报一支，小学组、中学组可各报一支（最多两支），大学组限报一支」。
     # 修复前 assert_report_quota 只按 user_id 计数，导致报完中学组的学校再也报不了小学组
     # （用户实际遇到：提交小学组草稿被拒，msg=「每所学校限报一支队伍，您已有报名记录」）。
-    def test_city_can_submit_one_report_per_group(self):
-        self.make_report(self.city, status=0, group="中学组")
-        self.authorize_as(self.city)
+    # 2026-09-24 起该能力由中小学端（/primary，type=5）承接。
+    def test_primary_can_submit_one_report_per_group(self):
+        self.make_report(self.primary, status=0, group="中学组")
+        self.authorize_as(self.primary)
 
         # 已有中学组一支 → 小学组仍应提交成功（这正是用户报不上来的那条）
-        created = self.json_request("post", "/api/city/report/drafts", {
+        created = self.json_request("post", "/api/primary/report/drafts", {
             "payload": self.payload(group="小学组")
         }).json()["data"]
         first = self.json_request(
-            "post", "/api/city/report/drafts/%s/submit" % created["draft_id"],
+            "post", "/api/primary/report/drafts/%s/submit" % created["draft_id"],
             {"version": created["version"]})
         self.assertEqual(first.status_code, 200, first.content)
-        self.assertEqual(Report.objects.filter(user_id=self.city.id).count(), 2)
+        self.assertEqual(Report.objects.filter(user_id=self.primary.id).count(), 2)
 
         # 但同一组别的第二支仍要被拦住（额度仍是每「组别」1，没有放开）
-        again = self.json_request("post", "/api/city/report/drafts", {
+        again = self.json_request("post", "/api/primary/report/drafts", {
             "payload": self.payload(group="小学组")
         }).json()["data"]
         second = self.json_request(
-            "post", "/api/city/report/drafts/%s/submit" % again["draft_id"],
+            "post", "/api/primary/report/drafts/%s/submit" % again["draft_id"],
             {"version": again["version"]})
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json().get("code"), "REPORT_QUOTA_EXCEEDED")
         self.assertIn("小学组", second.json().get("msg", ""))
-        self.assertEqual(Report.objects.filter(user_id=self.city.id).count(), 2)
+        self.assertEqual(Report.objects.filter(user_id=self.primary.id).count(), 2)
 
-    # ----- 回归：市级渠道不得报送大学组（渠道 × 组别的归属校验）-----
-    # 口径：组委会 2026-09-23「city 渠道不能出现大学组，铜管乐团同规则」。
+    # ----- 回归：中小学端不得报送大学组（渠道 × 组别的归属校验）-----
+    # 口径：组委会 2026-09-23「city 渠道不能出现大学组，铜管乐团同规则」；
+    # 该渠道 2026-09-24 更名为中小学端（scope 5），规则原样移植。
     #
     # 归属校验故意抛 InvalidSubmission(400) 而不是 ReportQuotaExceeded(409)。
     # 前端 normalizeDraftError 只对**已登记的错误码**单独分支，未登记的码退到按 HTTP
     # 状态兜底：409 会被判成「版本冲突」，弹的是硬编码的「该草稿已在其他页面或设备更新」
     # 外加一个解决不了这个问题的「重新加载服务器草稿」按钮；400 则落到 INVALID，
     # 走 OrchestraForm.notifyDraftError 的兜底分支原样显示 msg。所以 400 才让用户看得见原因。
-    def test_city_cannot_submit_university_group(self):
-        self.authorize_as(self.city)
-        created = self.json_request("post", "/api/city/report/drafts", {
+    def test_primary_cannot_submit_university_group(self):
+        self.authorize_as(self.primary)
+        created = self.json_request("post", "/api/primary/report/drafts", {
             "payload": self.payload(group="大学组")
         }).json()["data"]
         submit = self.json_request(
-            "post", "/api/city/report/drafts/%s/submit" % created["draft_id"],
+            "post", "/api/primary/report/drafts/%s/submit" % created["draft_id"],
             {"version": created["version"]})
         self.assertEqual(submit.status_code, 400, submit.content)
         self.assertEqual(submit.json().get("code"), "SUBMISSION_VALIDATION_FAILED")
         # 文案必须点出是哪个组别不行，否则用户不知道该改成什么
         self.assertIn("大学组", submit.json().get("msg", ""))
+        self.assertIn("中小学端", submit.json().get("msg", ""))
         # 不得留下正式报名
-        self.assertFalse(Report.objects.filter(user_id=self.city.id).exists())
+        self.assertFalse(Report.objects.filter(user_id=self.primary.id).exists())
         # 草稿要留在「编辑中」：整块事务回滚了，用户改完组别还能再提交，不会卡死
         draft = ReportDraft.objects.get(pk=int(created["draft_id"]))
         self.assertEqual(draft.state, ReportDraft.STATE_EDITING)
         self.assertEqual(draft.version, created["version"])
+
+    # ----- 回归：中小学端完整生命周期（草稿创建→更新→提交→驳回→edit-draft→重新提交）-----
+    def test_primary_full_lifecycle_through_draft_routes(self):
+        self.authorize_as(self.primary)
+        # 1. 创建草稿
+        created = self.json_request("post", "/api/primary/report/drafts", {
+            "payload": self.payload(group="小学组")
+        }).json()["data"]
+        # 2. 更新草稿
+        updated = self.json_request(
+            "put", "/api/primary/report/drafts/%s" % created["draft_id"],
+            {"version": created["version"], "payload": self.payload(group="小学组", name="改过的节目")})
+        self.assertEqual(updated.status_code, 200, updated.content)
+        # 3. 提交（PUT 后版本 +1）
+        submitted = self.json_request(
+            "post", "/api/primary/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"] + 1})
+        self.assertEqual(submitted.status_code, 200, submitted.content)
+        report_id = submitted.json()["data"]["report_id"]
+        # 4. 组委会驳回
+        Report.objects.filter(pk=report_id).update(status=-1, remark="材料不全")
+        # 5. edit-draft 进入编辑（重新播种，版本再 +1）
+        edit = self.json_request("post", "/api/primary/reports/%s/edit-draft" % report_id, {})
+        self.assertEqual(edit.status_code, 200, edit.content)
+        draft_id = edit.json()["data"]["draft_id"]
+        edit_version = edit.json()["data"]["version"]
+        # 6. 修改后重新提交
+        self.json_request(
+            "put", "/api/primary/report/drafts/%s" % draft_id,
+            {"version": edit_version, "payload": self.payload(group="小学组", name="补全材料")})
+        resubmitted = self.json_request(
+            "post", "/api/primary/report/drafts/%s/submit" % draft_id,
+            {"version": edit_version + 1})
+        self.assertEqual(resubmitted.status_code, 200, resubmitted.content)
+        report = Report.objects.get(pk=report_id)
+        self.assertEqual(report.name, "补全材料")
+        self.assertEqual(report.status, 0)
 
     # ----- 回归：P2-2 非对象 JSON body 应回 400 -----
     def test_non_object_json_body_returns_400(self):
@@ -261,30 +330,33 @@ class DraftApiTests(ApiTestCase):
 class GroupEligibilityTests(TestCase):
     """直接测 REPORT_ALLOWED_GROUPS / assert_group_allowed 的分支，不走 HTTP。
 
-    上面那条 API 测试只能证明「市级 + 大学组被拦」，证不了「高校端没被顺手拦住」——
+    上面那条 API 测试只能证明「中小学端 + 大学组被拦」，证不了「高校端没被顺手拦住」——
     而「高校端不加校验」是刻意的决定，必须钉住，否则将来有人补全这张表时会误伤高校端。
     """
 
-    def test_city_rejects_university_group(self):
-        for scope in (1,):
+    def test_primary_rejects_university_group(self):
+        for scope in (User.TYPE_PRIMARY_SECONDARY,):
             with self.assertRaises(InvalidSubmission):
                 assert_group_allowed(scope, "大学组")
 
-    def test_city_still_allows_elementary_and_middle(self):
-        assert_group_allowed(1, "小学组")   # 不抛即通过
-        assert_group_allowed(1, "中学组")
+    def test_primary_still_allows_elementary_and_middle(self):
+        assert_group_allowed(User.TYPE_PRIMARY_SECONDARY, "小学组")   # 不抛即通过
+        assert_group_allowed(User.TYPE_PRIMARY_SECONDARY, "中学组")
 
     def test_unlisted_scope_is_not_restricted(self):
-        # scope 0（高校端）本次明确不加校验；scope 4（省级）是西部音乐周遗留，本届无省级端。
-        # 两者都不在表里 → 一律放行。新增渠道忘了配表时也是这个后果（不校验），不会误拦用户。
+        # scope 0（高校端）本次明确不加校验；scope 4（省级）是西部音乐周遗留，本届无省级端；
+        # scope 1（市州）2026-09-24 起只读，没有写入路径，也不再配校验。
+        # 三者都不在表里 → 一律放行。新增渠道忘了配表时也是这个后果（不校验），不会误拦用户。
         assert_group_allowed(0, "小学组")
         assert_group_allowed(0, "任意组别")
+        assert_group_allowed(1, "大学组")
         assert_group_allowed(4, "任意组别")
         self.assertNotIn(0, REPORT_ALLOWED_GROUPS)
+        self.assertNotIn(1, REPORT_ALLOWED_GROUPS)
         self.assertNotIn(4, REPORT_ALLOWED_GROUPS)
 
     def test_missing_group_falls_through_to_required_field_check(self):
         # 组别为空不在本函数拦 —— 必填校验归 parse_submission_payload，
         # 否则同一个错误会出现两句不同的文案。
-        assert_group_allowed(1, None)
-        assert_group_allowed(1, "")
+        assert_group_allowed(User.TYPE_PRIMARY_SECONDARY, None)
+        assert_group_allowed(User.TYPE_PRIMARY_SECONDARY, "")

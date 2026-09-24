@@ -148,6 +148,13 @@ def _joined(members, position):
     return "、".join(_person_name(person) for person in members.get(position, []))
 
 
+def _conductor_type(grouped, report_id):
+    """指挥关系行的 type（0=学生、1=教师）；无指挥、多指挥或人物缺失时 None。"""
+    links = [link for link, person in grouped.get(report_id, [])
+             if int(link.position) == 2 and person is not None]
+    return links[0].type if len(links) == 1 else None
+
+
 # --- 附件2 对齐的共用取值（与报名信息表 PDF 的 form_context 同口径） -----------
 
 def _conductor(members):
@@ -156,6 +163,17 @@ def _conductor(members):
     name = "、".join(_person_name(person) for person in conductors)
     phone = "、".join(str(getattr(p, "phone", "") or "") for p in conductors if getattr(p, "phone", ""))
     return name, phone
+
+
+def adviser_instructors(conductors, teachers, conductor_type):
+    """附件2 指导老师名单的行序：指挥是教师（关系行 type=1）时，官方表格的
+    第一指导老师槽即指挥本人，学校另报的指导老师顺延到第 2 槽；指挥本人被
+    重复提交为指导老师（同 person_id）时只渲染一次。无指挥、多指挥（历史
+    数据）或指挥非教师时原样返回。"""
+    if conductor_type != 1 or len(conductors) != 1:
+        return list(teachers)
+    conductor = conductors[0]
+    return [conductor] + [p for p in teachers if p.id != conductor.id]
 
 
 def _adviser_slots(teachers):
@@ -240,7 +258,9 @@ def admin_data1_rows(reports: Iterable[Report]) -> list[list]:
         user = users.get(item.user_id)
         formal, reserve = members.get(0, []), members.get(1, [])
         conductor_name, conductor_phone = _conductor(members)
-        (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(members.get(4, []))
+        teachers = adviser_instructors(
+            members.get(2, []), members.get(4, []), _conductor_type(grouped, item.id))
+        (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(teachers)
         meals, remark = _meal_and_remark(item)
         rows.append([
             index,
@@ -297,7 +317,9 @@ def admin_data2_rows(reports: Iterable[Report]) -> list[list]:
         for person in members.get(0, []):
             instrument_counts[_instrument_bucket(getattr(person, "instrument", ""))] += 1
         conductor_name, conductor_phone = _conductor(members)
-        (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(members.get(4, []))
+        teachers = adviser_instructors(
+            members.get(2, []), members.get(4, []), _conductor_type(grouped, item.id))
+        (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(teachers)
         meals, remark = _meal_and_remark(item)
         rows.append([
             index,

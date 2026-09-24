@@ -1,3 +1,4 @@
+import io
 import unittest
 from datetime import timedelta
 
@@ -78,6 +79,7 @@ class RolePermissionTests(ApiTestCase):
             2: self.create_user("committee", 2),
             3: self.create_user("admin", 3),
             4: self.create_user("province", 4),
+            5: self.create_user("primary", 5),
         }
 
     def test_each_role_can_reach_its_own_dashboard_only(self):
@@ -87,6 +89,7 @@ class RolePermissionTests(ApiTestCase):
             2: "/api/committee/index/total",
             3: "/api/admin/index/total",
             4: "/api/province/index/total",
+            5: "/api/primary/index/total",
         }
 
         for user_type, own_route in routes.items():
@@ -153,7 +156,7 @@ class RolePermissionTests(ApiTestCase):
 
         for route in routes:
             expected = 3 if route.startswith("/api/admin/") else 2
-            for user_type in range(5):
+            for user_type in range(6):
                 if user_type == expected:
                     continue
                 with self.subTest(route=route, user_type=user_type):
@@ -165,6 +168,111 @@ class RolePermissionTests(ApiTestCase):
                     self.assertEqual(denied.status_code, 403)
                     self.assertEqual(denied.json()["code"], "FORBIDDEN")
                     self.assertEqual(denied.json()["msg"], "无该页面操作权限！")
+
+
+class PrimaryAndCityScopeTests(ApiTestCase):
+    """中小学端（type=5）承接原市州端报名功能；市州端（type=1）降级为纯只读。"""
+
+    def setUp(self):
+        self.primary = self.create_user("primary", 5)
+        self.city = self.create_user("city", 1)
+
+    def test_primary_dashboard_mirrors_city_panels(self):
+        report = self.make_report(self.primary, group="小学组")
+        self.authorize_as(self.primary)
+        for route in ("/api/primary/index/total", "/api/primary/index/percent",
+                      "/api/primary/index/establishment"):
+            result = self.client.get(route)
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result.json()["code"], 0)
+        # 与市州端同一口径：只统计本账号报送的报名
+        rows = self.client.get("/api/primary/index/establishment").json()["data"]["data"]
+        band = next(row for row in rows if row["name"] == "管乐团")
+        self.assertEqual(band["total"], 1)   # make_report 默认管乐团
+
+    def test_primary_endpoints_reject_other_roles(self):
+        self.authorize_as(self.city)
+        for route in ("/api/primary/index/total", "/api/primary/index/percent",
+                      "/api/primary/index/establishment", "/api/primary/report/list",
+                      "/api/primary/recommend/list"):
+            result = self.client.get(route)
+            self.assertEqual(result.status_code, 403, route)
+            self.assertEqual(result.json()["code"], "FORBIDDEN")
+
+    def test_city_read_only_endpoints_still_serve_type_one(self):
+        report = self.make_report(self.city, group="小学组")
+        self.authorize_as(self.city)
+        self.assertEqual(self.client.get("/api/city/report/list").status_code, 200)
+        self.assertEqual(self.client.get("/api/city/report/%s" % report.id).status_code, 200)
+        self.assertEqual(self.client.get("/api/city/recommend/list").status_code, 200)
+
+    def test_primary_scope_is_own_reports_only(self):
+        other = self.create_user("primary2", 5)
+        self.make_report(other, group="小学组")
+        mine = self.make_report(self.primary, group="中学组")
+        self.authorize_as(self.primary)
+
+        payload = self.client.get("/api/primary/report/list").json()
+
+        ids = [int(item["id"]) for item in payload["data"]]
+        self.assertIn(mine.id, ids)
+        self.assertNotIn(other.id, ids)
+
+
+class AdminUserManagementPrimaryTests(ApiTestCase):
+    """管理员账号管理覆盖中小学端（type=5）：列表、创建、账号导出。"""
+
+    def setUp(self):
+        self.admin = self.create_user("admin", 3)
+
+    def test_admin_user_list_includes_primary_accounts(self):
+        school = self.create_user("school", 0)
+        city = self.create_user("city", 1)
+        primary = self.create_user("primary", 5)
+        committee = self.create_user("committee", 2)
+        self.authorize_as(self.admin)
+
+        ids = [item["id"] for item in self.client.get("/api/admin/user/list").json()["data"]]
+
+        for user in (school, city, primary):
+            self.assertIn(user.id, ids)
+        self.assertNotIn(committee.id, ids)
+        self.assertNotIn(self.admin.id, ids)
+
+    def test_admin_creates_primary_account_that_can_access_primary_routes(self):
+        self.authorize_as(self.admin)
+        created = self.json_request("post", "/api/admin/user/", {
+            "username": "primary-school", "password": "pw", "nickname": "某小学", "type": 5,
+        })
+        self.assertEqual(created.json()["code"], 0, created.content)
+        self.assertEqual(User.objects.get(username="primary-school").type, 5)
+
+        login = self.json_request(
+            "post", "/api/login", {"username": "primary-school", "password": "pw"})
+        self.client.defaults["HTTP_AUTHORIZATION"] = "Bearer " + login.json()["data"]["token"]
+        self.assertEqual(self.client.get("/api/primary/index/total").json()["code"], 0)
+        # 校级（高校端）路由对中小学端账号不可见
+        self.assertEqual(self.client.get("/api/school/report/list").status_code, 403)
+
+    def test_admin_account_export_includes_primary_accounts(self):
+        self.create_user("school", 0)
+        self.create_user("primary", 5)
+        self.create_user("committee", 2)
+        self.authorize_as(self.admin)
+
+        result = self.client.get("/api/admin/user/export")
+
+        self.assertEqual(result.status_code, 200)
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl 未安装，无法解析导出文件")
+        rows = list(load_workbook(io.BytesIO(result.content)).active.iter_rows(values_only=True))
+        usernames = {row[0] for row in rows[1:]}
+        self.assertIn("school", usernames)
+        self.assertIn("primary", usernames)
+        self.assertNotIn("committee", usernames)
+        self.assertNotIn("admin", usernames)
 
 
 @unittest.skipUnless(HAVE_BCRYPT, "bcrypt 未安装：pip install -r requirements.txt")

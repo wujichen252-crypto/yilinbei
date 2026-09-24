@@ -16,6 +16,7 @@ class AdminExportAppendixAlignmentTests(ApiTestCase):
 
     夹具遵守 0007 迁移的库级规则：小学组指挥必须是教师（type=1）且教师指挥时
     指导老师最多 1 人；溢出并入第 2 槽的路径只能在无指挥的报名上出现。
+    指挥是教师时第一指导老师槽自动填指挥本人（adviser_instructors，附件2 口径）。
     """
 
     def setUp(self):
@@ -54,7 +55,8 @@ class AdminExportAppendixAlignmentTests(ApiTestCase):
         row = admin_data1_rows([self.report])[1]
         self.assertEqual(row[1], "参展小学")
         self.assertEqual(row[2:6], ["王领队", "13900000001", "指挥甲", "13900000002"])
-        self.assertEqual(row[6:10], ["老师一", "13900000003", "", ""])
+        # 教师指挥兼任第一指导老师槽（附件2 口径），另报的「老师一」顺延到第 2 槽
+        self.assertEqual(row[6:10], ["指挥甲", "13900000002", "老师一", "13900000003"])
         self.assertEqual(row[10:14], ["管乐团", "小学组", "指定曲", "自选曲"])
         self.assertEqual(row[14], "正式队员 3 人，预备队员 1 人")
         self.assertEqual(row[15], "长笛：甲、乙\n其他：丙")   # 次中音号归入其他；预备队员丁不进名单
@@ -70,7 +72,7 @@ class AdminExportAppendixAlignmentTests(ApiTestCase):
     def test_data2_counts_formal_members_only_per_appendix(self):
         row = admin_data2_rows([self.report])[1]
         self.assertEqual(row[4:8], ["王领队", "13900000001", "指挥甲", "13900000002"])
-        self.assertEqual(row[8:12], ["老师一", "13900000003", "", ""])
+        self.assertEqual(row[8:12], ["指挥甲", "13900000002", "老师一", "13900000003"])
         self.assertEqual(row[16], "正式队员 3 人，预备队员 1 人")
         # 长笛槽只有正式队员甲乙（预备队员丁的长笛不计入）；次中音号归入其他
         flute = row[17 + INSTRUMENTS.index("长笛")]
