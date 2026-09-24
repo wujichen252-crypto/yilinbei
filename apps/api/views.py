@@ -597,7 +597,7 @@ def admin_person_list(request):
     err = role_error(request, 3)
     if err: return err
     qs = Person.objects.all().order_by("id"); k = request.GET.get("keyword")
-    
+    if k: qs = qs.filter(Q(name__icontains=k) | Q(card__icontains=k) | Q(school__icontains=k))
     if request.GET.get("school"): qs = qs.filter(school__icontains=request.GET["school"])
     return response(list_page(qs, request, model_dict))
 
