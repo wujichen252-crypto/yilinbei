@@ -11,30 +11,33 @@ from .models import Files, Person, Report, ReportDraft, ReportPerson, User
 from .services import attach_report_people, store_people
 
 # 每所学校/单位可持有的（未删除）正式报名数上限；按 scope 分档：
-#   0 = 校级、1 = 市级、4 = 省级（历史 create_report 里的 "8" 沿用）。
+#   0 = 校级（高校端）、4 = 省级（历史 create_report 里的 "8" 沿用）、
+#   5 = 中小学端（原市州端 scope 1 的报名功能 2026-09-24 移植至此）。
 # 规则口径：驳回态（status=-1）与待审核态（status=0）同样占额度，
 # 只有软删除后才腾出名额，与 Report.objects（SoftDeleteManager）一致。
-REPORT_QUOTA_BY_SCOPE = {0: 1, 1: 1, 4: 8}
+# scope 1 已无写入路径（市州端只读），不再配额度。
+REPORT_QUOTA_BY_SCOPE = {0: 1, 4: 8, 5: 1}
 DEFAULT_REPORT_QUOTA = 1
 
 # 各 scope 允许报送的组别。**未列出的 scope 一律不做组别归属校验**（保持现状）。
 #
 # 口径依据（组委会 2026-09-23 答复，前端 HaveToRead.vue §二段 2 同步记载）：
-#   · 市级渠道（scope 1）只能报小学组、中学组，**不得出现大学组** ——
+#   · 中小学端（scope 5，原市级渠道）只能报小学组、中学组，**不得出现大学组** ——
 #     大学组归高校渠道。管乐团与铜管乐团同规则（不再按乐团类型细分）。
 #   · 「最多两支」由配额自动满足，不靠本表：本表限死 2 个组别，配额又是每组别 1 支，
 #     两者相乘即上限 2，且必然是一支小学、一支中学 —— 所以不可能出现「2 支小学组」。
 #   · 两支的乐团类型互相独立（小学管乐团 + 中学铜管乐团是允许的）。后端
 #     establishment 与 group 之间**零耦合**，本来就是自由的，无需改动。
 #
-# 为什么只有 scope 1：
+# 为什么只有 scope 5：
+#   · scope 1（原市级渠道）降级只读后不再有写入路径，不入表；
 #   · scope 0（高校端）组委会明确要求本次**不加**校验，故不入表；
 #   · scope 4（省级）是上一届西部音乐周 dist 包留下的，本届红头文件没有省级端，
 #     故不入表（不入表 = 不校验，保持现状，不为历史代码写新规则）。
-REPORT_ALLOWED_GROUPS = {1: ("小学组", "中学组")}
+REPORT_ALLOWED_GROUPS = {5: ("小学组", "中学组")}
 
 # 仅用于拼错误文案；查不到时退到「当前渠道」
-REPORT_SCOPE_LABELS = {0: "高校端", 1: "市级渠道", 4: "省级端"}
+REPORT_SCOPE_LABELS = {0: "高校端", 4: "省级端", 5: "中小学端"}
 
 REPORT_FIELDS = {
     "choir_name", "name", "name1", "school_name", "desc", "group",

@@ -78,6 +78,8 @@ class User(AbstractBaseUser):
     TYPE_COMMITTEE = 2
     TYPE_ADMIN = 3
     TYPE_PROVINCE = 4
+    # 中小学端：接管原市州端的报名功能（2026-09-24 起），市州端降级为只读。
+    TYPE_PRIMARY_SECONDARY = 5
     id = models.BigAutoField(primary_key=True)
     username = models.CharField(max_length=30, unique=True, default=" ")
     nickname = models.CharField(max_length=255, default=" ")
@@ -209,7 +211,10 @@ class ReportDraft(models.Model):
     STATE_SUBMITTED = 1
 
     SCOPE_SCHOOL = User.TYPE_SCHOOL
+    # 市州端已降级为只读（2026-09-24），不再产生新草稿；常量保留供存量
+    # scope=1 的历史草稿行识别与数据兼容。
     SCOPE_CITY = User.TYPE_CITY
+    SCOPE_PRIMARY_SECONDARY = User.TYPE_PRIMARY_SECONDARY
 
     id = models.BigAutoField(primary_key=True)
     user_id = models.BigIntegerField()

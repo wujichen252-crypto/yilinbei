@@ -982,10 +982,44 @@
         ]
       }
     },
+    "/api/primary/index/total": {
+      "get": {
+        "operationId": "apps_api_views_primary_total",
+        "summary": "Primary Total",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/city/index/percent": {
       "get": {
         "operationId": "apps_api_views_city_percent",
         "summary": "City Percent",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/index/percent": {
+      "get": {
+        "operationId": "apps_api_views_primary_percent",
+        "summary": "Primary Percent",
         "parameters": [],
         "responses": {
           "200": {
@@ -1067,25 +1101,10 @@
         ]
       }
     },
-    "/api/city/report/drafts": {
-      "post": {
-        "operationId": "city_draft_create",
-        "summary": " Draft Create",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      },
+    "/api/city/index/establishment": {
       "get": {
-        "operationId": "city_draft_list",
-        "summary": " Draft List",
+        "operationId": "apps_api_views_city_establishment",
+        "summary": "City Establishment",
         "parameters": [],
         "responses": {
           "200": {
@@ -1099,41 +1118,84 @@
         ]
       }
     },
-    "/api/city/report/drafts/{draft_id}": {
-      "put": {
-        "operationId": "city_draft_update",
-        "summary": " Draft Update",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "draft_id",
-            "schema": {
-              "title": "Draft Id",
-              "type": "integer"
-            },
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      },
+    "/api/primary/index/establishment": {
       "get": {
-        "operationId": "city_draft_get",
-        "summary": " Draft Get",
+        "operationId": "apps_api_views_primary_establishment",
+        "summary": "Primary Establishment",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/committee/index/establishment": {
+      "get": {
+        "operationId": "apps_api_views_committee_establishment",
+        "summary": "Committee Establishment",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/admin/index/establishment": {
+      "get": {
+        "operationId": "apps_api_views_admin_establishment",
+        "summary": "Admin Establishment",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/list": {
+      "get": {
+        "operationId": "city_report_list",
+        "summary": " List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/city/report/{id}": {
+      "get": {
+        "operationId": "city_report_get",
+        "summary": " Get",
         "parameters": [
           {
             "in": "path",
-            "name": "draft_id",
+            "name": "id",
             "schema": {
-              "title": "Draft Id",
+              "title": "Id",
               "type": "integer"
             },
             "required": true
@@ -1151,48 +1213,11 @@
         ]
       }
     },
-    "/api/city/report/drafts/{draft_id}/submit": {
-      "post": {
-        "operationId": "city_draft_submit",
-        "summary": " Draft Submit",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "draft_id",
-            "schema": {
-              "title": "Draft Id",
-              "type": "integer"
-            },
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
-    "/api/city/reports/{report_id}/edit-draft": {
-      "post": {
-        "operationId": "city_report_edit_draft",
-        "summary": " Edit Draft",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "report_id",
-            "schema": {
-              "title": "Report Id",
-              "type": "integer"
-            },
-            "required": true
-          }
-        ],
+    "/api/city/recommend/list": {
+      "get": {
+        "operationId": "city_recommend_list",
+        "summary": " Recommend List",
+        "parameters": [],
         "responses": {
           "200": {
             "description": "OK"
@@ -1331,145 +1356,6 @@
             "required": true
           }
         ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
-    "/api/city/report/list": {
-      "get": {
-        "operationId": "city_report_list",
-        "summary": " List",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
-    "/api/city/report/create": {
-      "post": {
-        "operationId": "city_report_create",
-        "summary": " Create",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
-    "/api/city/report/update": {
-      "put": {
-        "operationId": "city_report_update",
-        "summary": " Update",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
-    "/api/city/report/delete/{id}": {
-      "delete": {
-        "operationId": "city_report_delete",
-        "summary": " Delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "id",
-            "schema": {
-              "title": "Id",
-              "type": "integer"
-            },
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
-    "/api/city/report/{id}": {
-      "get": {
-        "operationId": "city_report_get",
-        "summary": " Get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "id",
-            "schema": {
-              "title": "Id",
-              "type": "integer"
-            },
-            "required": true
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
-    "/api/city/recommend/list": {
-      "get": {
-        "operationId": "city_recommend_list",
-        "summary": " Recommend List",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "OK"
-          }
-        },
-        "security": [
-          {
-            "BearerAuth": []
-          }
-        ]
-      }
-    },
-    "/api/city/recommend/cau": {
-      "post": {
-        "operationId": "city_recommend_create_update",
-        "summary": " Recommend Cau",
-        "parameters": [],
         "responses": {
           "200": {
             "description": "OK"
@@ -1746,6 +1632,283 @@
     "/api/province/recommend/cau": {
       "post": {
         "operationId": "province_recommend_create_update",
+        "summary": " Recommend Cau",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/report/drafts": {
+      "post": {
+        "operationId": "primary_draft_create",
+        "summary": " Draft Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "primary_draft_list",
+        "summary": " Draft List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/report/drafts/{draft_id}": {
+      "put": {
+        "operationId": "primary_draft_update",
+        "summary": " Draft Update",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      },
+      "get": {
+        "operationId": "primary_draft_get",
+        "summary": " Draft Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/report/drafts/{draft_id}/submit": {
+      "post": {
+        "operationId": "primary_draft_submit",
+        "summary": " Draft Submit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "schema": {
+              "title": "Draft Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/reports/{report_id}/edit-draft": {
+      "post": {
+        "operationId": "primary_report_edit_draft",
+        "summary": " Edit Draft",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "schema": {
+              "title": "Report Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/report/list": {
+      "get": {
+        "operationId": "primary_report_list",
+        "summary": " List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/report/create": {
+      "post": {
+        "operationId": "primary_report_create",
+        "summary": " Create",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/report/update": {
+      "put": {
+        "operationId": "primary_report_update",
+        "summary": " Update",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/report/delete/{id}": {
+      "delete": {
+        "operationId": "primary_report_delete",
+        "summary": " Delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/report/{id}": {
+      "get": {
+        "operationId": "primary_report_get",
+        "summary": " Get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "schema": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/recommend/list": {
+      "get": {
+        "operationId": "primary_recommend_list",
+        "summary": " Recommend List",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/primary/recommend/cau": {
+      "post": {
+        "operationId": "primary_recommend_create_update",
         "summary": " Recommend Cau",
         "parameters": [],
         "responses": {

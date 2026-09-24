@@ -339,7 +339,7 @@ def file_list(request):
 
 @api.get("/scan/list", auth=auth)
 def scan_list(request):
-    types = [0, 1, 4]
+    types = [0, 1, 4, User.TYPE_PRIMARY_SECONDARY]
     qs = User.objects.filter(type__in=types).order_by("id")
     if request.GET.get("keyword"):
         qs = qs.filter(nickname__icontains=request.GET["keyword"])
@@ -503,8 +503,8 @@ def admin_recommend_list(request):
 
 
 def user_list(request):
-    # 省级（4）为无效数据，admin 与 committee 均只展示学校（0）和市级（1）
-    qs = User.objects.filter(type__in=(0, 1)).order_by("id"); keyword = request.GET.get("keyword")
+    # 省级（4）为无效数据，admin 与 committee 展示学校（0）、市级（1）与中小学端（5）
+    qs = User.objects.filter(type__in=(0, 1, User.TYPE_PRIMARY_SECONDARY)).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
     return response(list_page(qs, request, user_dict))
 
@@ -541,7 +541,7 @@ def user_restore_admin(request):
 
 
 def user_export_admin(request):
-    qs = User.objects.all() if request.auth.type == 2 else User.objects.filter(type=0)
+    qs = User.objects.all() if request.auth.type == 2 else User.objects.filter(type__in=(0, User.TYPE_PRIMARY_SECONDARY))
     rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "备注"]]
     rows += [[x.username, x.nickname, "初始密码为scdyz@2023，请登陆系统后修改密码，密码找回请联系省级行政部门。", x.leader, x.tel, x.description] for x in qs]
     return xlsx_response(rows, request.auth.username + ".xlsx")
@@ -758,13 +758,30 @@ def scoped_total(request, expected, kind):
 def city_total(request): return scoped_total(request, 1, "city")
 
 
+@api.get("/primary/index/total", auth=auth)
+def primary_total(request): return scoped_total(request, User.TYPE_PRIMARY_SECONDARY, "city")
+
+
+def _index_percent_payload(request):
+    """市州端/中小学端共用的 40% 口径面板（group="0" 为历史遗留的数字组别串）。"""
+    uid = request.auth.id; elementary = Report.objects.filter(user_id=uid, group="0").count(); middle = Report.objects.filter(user_id=uid, group="0", group_type=1).count() if hasattr(Report, "group_type") else 0
+    ratio = (middle / elementary) if elementary else 0
+    return {"data": [{"require": "中学组数量不低于中小学组报送总数40%", "pass": 1, "data": ["中学组数量所在比:" + str(round(ratio * 100, 2)) + "%"]}, {"require": "中小学组同一学校只能报送1个", "pass": 1, "data": []}, {"require": "中小学教师组同一个县（区）只能报送1个", "pass": 1, "data": []}]}
+
+
 @api.get("/city/index/percent", auth=auth)
 def city_percent(request):
     err = role_error(request, 1)
     if err: return err
-    uid = request.auth.id; elementary = Report.objects.filter(user_id=uid, group="0").count(); middle = Report.objects.filter(user_id=uid, group="0", group_type=1).count() if hasattr(Report, "group_type") else 0
-    ratio = (middle / elementary) if elementary else 0
-    return response(success("获取成功！", {"data": [{"require": "中学组数量不低于中小学组报送总数40%", "pass": 1, "data": ["中学组数量所在比:" + str(round(ratio * 100, 2)) + "%"]}, {"require": "中小学组同一学校只能报送1个", "pass": 1, "data": []}, {"require": "中小学教师组同一个县（区）只能报送1个", "pass": 1, "data": []}]}))
+    return response(success("获取成功！", _index_percent_payload(request)))
+
+
+@api.get("/primary/index/percent", auth=auth)
+def primary_percent(request):
+    # 中小学端完整镜像市州端统计面板
+    err = role_error(request, User.TYPE_PRIMARY_SECONDARY)
+    if err: return err
+    return response(success("获取成功！", _index_percent_payload(request)))
 
 
 @api.get("/school/index/total", auth=auth)
@@ -785,6 +802,51 @@ def province_total(request): return scoped_total(request, 4, "province")
 def province_percent(request):
     err = role_error(request, 4)
     return err or response(success("获取成功！", {"data": []}))
+
+
+def establishment_stats(qs):
+    """首页「乐团类别统计」：管乐团/铜管乐团 × 审核状态。
+
+    行结构与 /index/total 的组别统计一致（total=合计、data1=驳回、
+    data2=待审核、data3=组委会通过），前端表格组件可直接复用。
+    establishment 是单选（"管乐团"/"铜管乐团"），其余脏值不落入任何一行。
+    """
+    rows = []
+    for value in ("管乐团", "铜管乐团"):
+        eq = qs.filter(establishment=value)
+        rows.append({"name": value, "total": eq.count(),
+                     "data1": eq.filter(status=-1).count(),
+                     "data2": eq.filter(status=0).count(),
+                     "data3": eq.filter(status=1).count()})
+    return rows
+
+
+@api.get("/city/index/establishment", auth=auth)
+def city_establishment(request):
+    # 市州口径同 /city/index/total：只统计本账号报送的报名
+    err = role_error(request, 1)
+    if err: return err
+    return response(success("获取成功！", {"data": establishment_stats(Report.objects.filter(user_id=request.auth.id))}))
+
+
+@api.get("/primary/index/establishment", auth=auth)
+def primary_establishment(request):
+    # 中小学端镜像市州端：只统计本账号报送的报名
+    err = role_error(request, User.TYPE_PRIMARY_SECONDARY)
+    if err: return err
+    return response(success("获取成功！", {"data": establishment_stats(Report.objects.filter(user_id=request.auth.id))}))
+
+
+@api.get("/committee/index/establishment", auth=auth)
+def committee_establishment(request):
+    err = role_error(request, 2)
+    return err or response(success("获取成功！", {"data": establishment_stats(Report.objects.all())}))
+
+
+@api.get("/admin/index/establishment", auth=auth)
+def admin_establishment(request):
+    err = role_error(request, 3)
+    return err or response(success("获取成功！", {"data": establishment_stats(Report.objects.all())}))
 
 
 def _draft_error_response(error):
@@ -967,26 +1029,29 @@ def register_draft_routes(prefix, expected, scope):
             return _draft_error_response(DraftConflict("草稿已在其他页面创建，请刷新"))
 
 
-def register_scope_routes(prefix, expected, province=False):
+def register_scope_routes(prefix, expected, province=False, writable=True):
+    """注册一个渠道的正式报名路由；writable=False 时只保留只读端点
+    （报名列表/详情、推荐列表），写入端点整体摘除（路由 404，而非 403）。"""
     tag = prefix.strip("/").replace("/", "_")
     @api.get(prefix + "/report/list", auth=auth, operation_id=tag + "_report_list")
     def _list(request):
         err = role_error(request, expected); return err or report_page(request, request.auth)
-    @api.post(prefix + "/report/create", auth=auth, operation_id=tag + "_report_create")
-    def _create(request):
-        err = role_error(request, expected); return err or create_report(request, province)
-    @api.put(prefix + "/report/update", auth=auth, operation_id=tag + "_report_update")
-    def _update(request):
-        err = role_error(request, expected); return err or update_report(request)
-    @api.delete(prefix + "/report/delete/{id}", auth=auth, operation_id=tag + "_report_delete")
-    def _delete(request, id: int):
-        err = role_error(request, expected)
-        if err: return err
-        report = Report.objects.filter(pk=id).first()
-        if not report: return response(failure("未找到相关信息！", None))
-        if report.user_id != request.auth.id:
-            return response(failure("不具备该报表删除权限！", None))
-        report.delete(); write_log(request.auth, 3, "删除节目报名表 " + str(report.name)); return response(success("删除成功!", None))
+    if writable:
+        @api.post(prefix + "/report/create", auth=auth, operation_id=tag + "_report_create")
+        def _create(request):
+            err = role_error(request, expected); return err or create_report(request, province)
+        @api.put(prefix + "/report/update", auth=auth, operation_id=tag + "_report_update")
+        def _update(request):
+            err = role_error(request, expected); return err or update_report(request)
+        @api.delete(prefix + "/report/delete/{id}", auth=auth, operation_id=tag + "_report_delete")
+        def _delete(request, id: int):
+            err = role_error(request, expected)
+            if err: return err
+            report = Report.objects.filter(pk=id).first()
+            if not report: return response(failure("未找到相关信息！", None))
+            if report.user_id != request.auth.id:
+                return response(failure("不具备该报表删除权限！", None))
+            report.delete(); write_log(request.auth, 3, "删除节目报名表 " + str(report.name)); return response(success("删除成功!", None))
     @api.get(prefix + "/report/{id}", auth=auth, operation_id=tag + "_report_get")
     def _get(request, id: int):
         err = role_error(request, expected)
@@ -1009,14 +1074,15 @@ def register_scope_routes(prefix, expected, province=False):
         err = role_error(request, expected)
         if err: return err
         return response(list_page(Recommend.objects.filter(user_id=request.auth.id).order_by("-created_at"), request, recommend_dict))
-    @api.post(prefix + "/recommend/cau", auth=auth, operation_id=tag + "_recommend_create_update")
-    def _recommend_cau(request):
-        err = role_error(request, expected)
-        if err: return err
-        data = body(request); obj, created = Recommend.objects.get_or_create(user_id=request.auth.id)
-        for k, v in data.items():
-            if k in {"file", "status", "remark"}: setattr(obj, k, v)
-        obj.save(); return response(success("操作成功！", None))
+    if writable:
+        @api.post(prefix + "/recommend/cau", auth=auth, operation_id=tag + "_recommend_create_update")
+        def _recommend_cau(request):
+            err = role_error(request, expected)
+            if err: return err
+            data = body(request); obj, created = Recommend.objects.get_or_create(user_id=request.auth.id)
+            for k, v in data.items():
+                if k in {"file", "status", "remark"}: setattr(obj, k, v)
+            obj.save(); return response(success("操作成功！", None))
 
 
 def _map_pair(prefix, value):
@@ -1029,11 +1095,14 @@ def _map_pair(prefix, value):
     return result
 
 
-register_draft_routes("/city", 1, ReportDraft.SCOPE_CITY)
+# 市州端（type=1）2026-09-24 起只读：草稿流与写入端点整体摘除，历史数据仍可查看。
+register_scope_routes("/city", 1, writable=False)
 register_draft_routes("/school", 0, ReportDraft.SCOPE_SCHOOL)
-register_scope_routes("/city", 1)
 register_scope_routes("/school", 0)
 register_scope_routes("/province", 4, True)
+# 中小学端（type=5）：原市州端报名功能整体移植至此（草稿流 + 正式报名 + 推荐写入）。
+register_draft_routes("/primary", User.TYPE_PRIMARY_SECONDARY, ReportDraft.SCOPE_PRIMARY_SECONDARY)
+register_scope_routes("/primary", User.TYPE_PRIMARY_SECONDARY)
 
 
 @api.get("/ticket/list")
