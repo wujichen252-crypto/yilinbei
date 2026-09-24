@@ -509,12 +509,16 @@ def user_list(request):
     return response(list_page(qs, request, user_dict))
 
 
+# 组委会/管理员重置密码：请求体带 password 字段即视为重置，无需填写新密码，一律重置为默认密码
+RESET_PASSWORD_DEFAULT = "scylb@2026"
+
+
 def user_update_admin(request):
     data = body(request); user = User.all_objects.filter(pk=data.get("id")).first()
     if not user: return response(failure("用户不存在"))
     for k in ("username", "nickname", "description", "tel", "leader", "type", "parent_id"):
         if k in data: setattr(user, k, data[k])
-    if data.get("password"): user.set_password(data["password"])
+    if "password" in data: user.set_password(RESET_PASSWORD_DEFAULT)
     user.save(); write_log(request.auth, 1, "修改用户 " + user.username)
     return response(success())
 
