@@ -48,7 +48,8 @@ REPORT_FIELDS = {
 SERVER_FIELDS = {"user_id", "scope", "status", "report_id", "draft_id", "version",
                  "created_at", "updated_at", "submitted_at"}
 PERSON_FIELDS = {"id", "name", "card", "age", "school", "phone", "gender",
-                 "major", "head", "instrument", "other", "remark", "position", "type"}
+                 "major", "head", "instrument", "other", "remark", "position", "type",
+                 "signature_order"}
 
 # 单字段上限，与 Report 各列 max_length 对齐；未列出的字段沿用 255（大部分列宽）
 _FIELD_LIMITS = {"desc": 1000}
@@ -231,6 +232,8 @@ def _person(item, index, complete=False):
     result["age"] = _integer(item.get("age"), "person[%s].age" % index)
     result["position"] = _integer(item.get("position"), "person[%s].position" % index, complete, 0)
     result["type"] = _integer(item.get("type"), "person[%s].type" % index, complete, 0)
+    # 署名排序：可空；填了必须 ≥1 的整数（0/负数/字符串在前端就该拦住，这里兜底 400）
+    result["signature_order"] = _integer(item.get("signature_order"), "person[%s].signature_order" % index, False, 1)
     return result
 
 
@@ -300,6 +303,7 @@ def payload_from_report(report):
             "gender": person.gender, "major": person.major, "head": person.head,
             "instrument": person.instrument, "other": person.other, "remark": person.remark,
             "position": link.position, "type": link.type,
+            "signature_order": link.signature_order,
         })
     return result
 

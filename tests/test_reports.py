@@ -116,6 +116,22 @@ class ReportTransactionAndSoftDeleteTests(ApiTestCase):
         self.assertEqual(links[0].position, 2)
         self.assertEqual(Person.objects.get(pk=links[0].person_id).card, "new-card")
 
+    def test_create_coerces_signature_order_leniently(self):
+        # 直传路径宽松规整："3"→3；0/布尔归 None（不新增报错面，草稿路径才严格 400）
+        payload = self.report_payload(person=[
+            {"name": "老师A", "card": "sig-a", "position": 4, "type": 1, "signature_order": "3"},
+            {"name": "老师B", "card": "sig-b", "position": 4, "type": 1, "signature_order": 0},
+            {"name": "老师C", "card": "sig-c", "position": 4, "type": 1, "signature_order": True},
+        ])
+
+        result = self.json_request("post", "/api/school/report/create", payload)
+
+        self.assertEqual(result.json()["code"], 0)
+        cards = {p.id: p.card for p in Person.objects.all()}
+        orders = {cards[link.person_id]: link.signature_order
+                  for link in ReportPerson.objects.all()}
+        self.assertEqual(orders, {"sig-a": 3, "sig-b": None, "sig-c": None})
+
 
 @override_settings(
     PERSON_HEAD_ALLOWED_DOMAINS=["avatars.example.com"],

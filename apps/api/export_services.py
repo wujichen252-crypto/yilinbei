@@ -134,13 +134,29 @@ def _snapshot(reports: Iterable[Report]):
     return records, grouped, users, files
 
 
+def instructor_sort_key(link):
+    """指导老师（position=4 关系行）的署名排序键：signature_order 升序；
+    未填的排在全部已填之后、按关系行 id（=提交顺序，attach_report_people
+    每次全删全插会重排 id）；同号按关系行 id。教师指挥的「固定第一署名」
+    由 adviser_instructors 在本排序之后叠加，不在这里处理。"""
+    order = getattr(link, "signature_order", None)
+    return (0, order, link.id) if order is not None else (1, 0, link.id)
+
+
 def _members(grouped, report_id):
     """Return names grouped by Laravel ``ReportPerson.position`` values."""
 
     result = defaultdict(list)
+    instructors = []
     for link, person in grouped.get(report_id, []):
-        if person is not None:
+        if person is None:
+            continue
+        if int(link.position) == 4:
+            instructors.append((instructor_sort_key(link), person))
+        else:
             result[int(link.position)].append(person)
+    if instructors:
+        result[4] = [person for _, person in sorted(instructors, key=lambda pair: pair[0])]
     return result
 
 

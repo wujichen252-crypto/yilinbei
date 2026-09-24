@@ -94,6 +94,40 @@ class AdminExportAppendixAlignmentTests(ApiTestCase):
         self.assertEqual(row[18], "")                              # 6 个时段无一命中
         self.assertEqual(row[17], "用餐预约：周末加餐")            # 并入备注（与报名信息表 PDF 同口径）
 
+    # --- 署名排序（report_person.signature_order）---------------------------
+
+    def add_instructor(self, report, name, phone, signature_order=None):
+        person = Person.objects.create(name=name, user_id=self.school.id,
+                                       card=f"card-{name}", phone=phone)
+        ReportPerson.objects.create(report_id=report.id, person_id=person.id,
+                                    position=4, type=0, signature_order=signature_order)
+        return person
+
+    def test_data1_orders_instructors_by_signature_order(self):
+        # 署名序号决定指导老师槽位先后：老师乙=2 先提交，老师甲=1 仍占第 1 槽
+        report = self.make_report(self.school, choir_name="署名排序团队", dinner_reservation=[])
+        self.add_instructor(report, "老师乙", "13900000012", signature_order=2)
+        self.add_instructor(report, "老师甲", "13900000011", signature_order=1)
+        row = admin_data1_rows([report])[1]
+        self.assertEqual(row[6:10], ["老师甲", "13900000011", "老师乙", "13900000012"])
+
+    def test_data2_orders_instructors_by_signature_order(self):
+        report = self.make_report(self.school, choir_name="署名排序团队", dinner_reservation=[])
+        self.add_instructor(report, "老师乙", "13900000012", signature_order=2)
+        self.add_instructor(report, "老师甲", "13900000011", signature_order=1)
+        row = admin_data2_rows([report])[1]
+        self.assertEqual(row[8:12], ["老师甲", "13900000011", "老师乙", "13900000012"])
+
+    def test_instructor_without_signature_order_falls_after_numbered(self):
+        # 未填序号的按提交顺序排在全部已填序号之后
+        report = self.make_report(self.school, choir_name="署名排序团队", dinner_reservation=[])
+        self.add_instructor(report, "老师丙", "13900000013")                      # 无号，先提交
+        self.add_instructor(report, "老师甲", "13900000011", signature_order=1)   # 有号
+        self.add_instructor(report, "老师丁", "13900000014")                      # 无号，后提交
+        row = admin_data1_rows([report])[1]
+        self.assertEqual(row[6], "老师甲")                 # 槽1 = 最小序号
+        self.assertEqual(row[8], "老师丙、老师丁")          # 槽2 = 无号者按提交顺序
+
 
 class ExportCompatibilityTests(ApiTestCase):
     def setUp(self):

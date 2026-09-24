@@ -14,11 +14,11 @@ def decode_disposition(raw):
                    for value, charset in parts)
 
 
-def link(report, person, position, type=None):
+def link(report, person, position, type=None, signature_order=None):
     # type 未指定时沿用旧夹具惯例（type=position，即未知身份，规则放行）
     return ReportPerson.objects.create(
         report_id=report.id, person_id=person.id, position=position,
-        type=position if type is None else type)
+        type=position if type is None else type, signature_order=signature_order)
 
 
 class RegistrationFormContextTests(ApiTestCase):
@@ -31,11 +31,11 @@ class RegistrationFormContextTests(ApiTestCase):
             name1="指定曲目A", name="自选曲目B", remark="请安排停车",
         )
 
-    def add_person(self, name, position, instrument="", phone="", type=None):
+    def add_person(self, name, position, instrument="", phone="", type=None, signature_order=None):
         person = Person.objects.create(name=name, user_id=self.school.id,
                                        card=f"card-{name}", instrument=instrument,
                                        phone=phone)
-        link(self.report, person, position, type=type)
+        link(self.report, person, position, type=type, signature_order=signature_order)
         return person
 
     def test_checkboxes_school_fallback_and_headcount(self):
@@ -118,6 +118,41 @@ class RegistrationFormContextTests(ApiTestCase):
 
         self.assertEqual(ctx["teacher_lines"], ["1. 刘老师"])
         self.assertEqual(ctx["teacher_phones"], ["13900000002"])
+
+    def test_instructor_rows_order_by_signature_order(self):
+        # 署名序号小的在前，与提交顺序无关
+        self.add_person("刘老师", 4, phone="13900000002", signature_order=2)
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 陈老师", "2. 刘老师"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000003", "13900000002"])
+
+    def test_instructor_without_signature_order_falls_after_numbered(self):
+        # 未填序号的排在全部已填之后、按提交顺序（关系行 id）
+        self.add_person("刘老师", 4, phone="13900000002")                      # 无号，先提交
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)   # 有号
+        self.add_person("王老师", 4, phone="13900000004")                      # 无号，后提交
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 陈老师", "2. 刘老师", "3. 王老师"])
+
+    def test_instructor_tie_breaks_by_submission_order(self):
+        # 同号并列时按提交顺序（关系行 id）稳定排序
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)
+        self.add_person("刘老师", 4, phone="13900000002", signature_order=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 陈老师", "2. 刘老师"])
+
+    def test_teacher_conductor_fixed_first_then_signature_order(self):
+        # 教师指挥固定占第一署名位，其余指导老师按署名序号顺延
+        self.add_person("王指挥", 2, phone="13900000001", type=1)
+        self.add_person("刘老师", 4, phone="13900000002", signature_order=2)
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 王指挥", "2. 陈老师", "3. 刘老师"])
 
     def test_meal_slots_accept_index_label_and_abbreviation(self):
         self.report.dinner_reservation = [0, "11月21日晚餐", "22午"]

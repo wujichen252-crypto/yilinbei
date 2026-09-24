@@ -193,14 +193,20 @@ def _checkline(options, value):
 
 def form_context(report):
     """把一张报名表整理成官方表格各栏的纯文本值（便于测试与渲染解耦）。"""
-    from apps.api.export_services import _instrument_bucket, _person_name, adviser_instructors
+    from apps.api.export_services import (_instrument_bucket, _person_name,
+                                          adviser_instructors, instructor_sort_key)
     from apps.core.models import Person, ReportPerson, User
 
     links = list(ReportPerson.objects.filter(report_id=report.id))
     people = {p.id: p for p in Person.objects.filter(id__in=[x.person_id for x in links if x.person_id])}
 
     def members(position):
-        return [people[x.person_id] for x in links if x.position == position and x.person_id in people]
+        rows = [x for x in links if x.position == position and x.person_id in people]
+        if position == 4:
+            # 指导老师按署名排序（与后台导出共用 instructor_sort_key）；
+            # 教师指挥固定第一由下方 adviser_instructors 叠加
+            rows.sort(key=instructor_sort_key)
+        return [people[x.person_id] for x in rows]
 
     formal, reserve = members(0), members(1)
     conductors, teachers = members(2), members(4)

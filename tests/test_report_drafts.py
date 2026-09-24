@@ -27,6 +27,19 @@ class DraftPayloadTests(ApiTestCase):
         with self.assertRaises(Exception):
             normalize_draft_payload({"file": "/tmp/file.pdf"})
 
+    def test_normalizer_accepts_null_and_positive_signature_order_only(self):
+        # 署名排序：可空；填了必须 ≥1 的整数（0/负数/字符串/小数/布尔都拒绝）
+        ok = normalize_draft_payload({"person": [
+            {"name": "甲", "card": "c1", "position": 4, "type": 1, "signature_order": 1},
+            {"name": "乙", "card": "c2", "position": 4, "type": 1},
+        ]})
+        self.assertEqual([p["signature_order"] for p in ok["person"]], [1, None])
+        for bad in (0, -1, "1", 1.5, True):
+            with self.assertRaises(DraftError):
+                normalize_draft_payload({"person": [
+                    {"name": "甲", "card": "c1", "position": 4, "type": 1,
+                     "signature_order": bad}]})
+
 
 class DraftApiTests(ApiTestCase):
     def setUp(self):
@@ -116,6 +129,47 @@ class DraftApiTests(ApiTestCase):
         self.authorize_as(self.primary)
         result = self.client.get("/api/primary/report/drafts/%s" % created["draft_id"])
         self.assertEqual(result.status_code, 404)
+
+    # ----- 署名排序（report_person.signature_order）-------------------------
+
+    def test_person_signature_order_round_trips_through_draft(self):
+        payload = self.payload(person=[
+            {"name": "刘老师", "card": "sig-1", "age": 30, "gender": "女",
+             "position": 4, "type": 1, "signature_order": 2},
+            {"name": "陈老师", "card": "sig-2", "age": 31, "gender": "男",
+             "position": 4, "type": 1, "signature_order": 1},
+        ])
+        created = self.json_request("post", "/api/school/report/drafts", {
+            "payload": payload}).json()["data"]
+        draft = ReportDraft.objects.get(pk=int(created["draft_id"]))
+        stored = json.loads(draft.payload)["person"]
+        self.assertEqual([p["signature_order"] for p in stored], [2, 1])
+
+        submitted = self.json_request(
+            "post", "/api/school/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"]})
+        self.assertEqual(submitted.status_code, 200)
+        orders = list(ReportPerson.objects.order_by("id")
+                      .values_list("signature_order", flat=True))
+        self.assertEqual(orders, [2, 1])
+
+    def test_person_rejects_non_positive_signature_order(self):
+        for bad in (0, -1, "1"):
+            payload = self.payload(person=[
+                {"name": "刘老师", "card": "sig-1", "position": 4, "type": 1,
+                 "signature_order": bad}])
+            result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+            self.assertEqual(result.status_code, 400, "signature_order=%r 应拒绝" % bad)
+
+    def test_legacy_person_without_signature_order_still_saves(self):
+        # 旧前端不带该键：照常保存，草稿里为 null（提交后落库 NULL，导出退回提交顺序）
+        payload = self.payload(person=[
+            {"name": "刘老师", "card": "sig-1", "position": 4, "type": 1}])
+        result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+        self.assertEqual(result.status_code, 200)
+        draft = ReportDraft.objects.get(pk=int(result.json()["data"]["draft_id"]))
+        stored = json.loads(draft.payload)["person"]
+        self.assertIsNone(stored[0]["signature_order"])
 
     # ----- 回归：市州端只读化（2026-09-24），写入端点整体摘除而非 403 -----
     def test_city_write_routes_are_removed(self):
