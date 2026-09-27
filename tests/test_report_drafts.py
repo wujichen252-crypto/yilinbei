@@ -344,17 +344,33 @@ class DraftApiTests(ApiTestCase):
         self.assertEqual(submit.json().get("code"), "REPORT_QUOTA_EXCEEDED")
         self.assertEqual(Report.objects.count(), 1)
 
-    # ----- 回归：配额的单位是「组别」不是「账号」，小学组与中学组可各报一支 -----
-    # 口径依据：src/components/common/HaveToRead.vue §二段 2 的【2026-09-23 口径变更】——
-    # 「每所学校每个组别限报一支，小学组、中学组可各报一支（最多两支），大学组限报一支」。
-    # 修复前 assert_report_quota 只按 user_id 计数，导致报完中学组的学校再也报不了小学组
-    # （用户实际遇到：提交小学组草稿被拒，msg=「每所学校限报一支队伍，您已有报名记录」）。
-    # 2026-09-24 起该能力由中小学端（/primary，type=5）承接。
-    def test_primary_can_submit_one_report_per_group(self):
+    # ----- 2026-09-27 口径：中小学端默认每校只能报一支（一个组别）-----
+    # 口径演进：红头文件原文「每所学校限报一支队伍，且只能参加一个组别」。
+    # 2026-09-23 曾短暂放开为「每组别一支、小学/中学可各一支」，2026-09-27 收回：
+    # 默认账号只能报一支；确属中小学合并办学的学校由管理员授予 can_report_twice
+    # 后才能报两支（仍受每组别一支约束）。
+    def test_primary_default_quota_is_one_report_total(self):
         self.make_report(self.primary, status=0, group="中学组")
         self.authorize_as(self.primary)
 
-        # 已有中学组一支 → 小学组仍应提交成功（这正是用户报不上来的那条）
+        # 已有中学组一支 → 即使改报小学组也必须拒绝（账号总量 1，不再按组别分开计数）
+        created = self.json_request("post", "/api/primary/report/drafts", {
+            "payload": self.payload(group="小学组")
+        }).json()["data"]
+        submit = self.json_request(
+            "post", "/api/primary/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"]})
+        self.assertEqual(submit.status_code, 409)
+        self.assertEqual(submit.json().get("code"), "REPORT_QUOTA_EXCEEDED")
+        self.assertEqual(Report.objects.filter(user_id=self.primary.id).count(), 1)
+
+    def test_merged_primary_can_submit_primary_and_middle_one_each(self):
+        self.primary.can_report_twice = True
+        self.primary.save(update_fields=["can_report_twice"])
+        self.make_report(self.primary, status=0, group="中学组")
+        self.authorize_as(self.primary)
+
+        # 合并办学被授予特许：中学组一支已存在 → 小学组仍应提交成功
         created = self.json_request("post", "/api/primary/report/drafts", {
             "payload": self.payload(group="小学组")
         }).json()["data"]
@@ -364,7 +380,7 @@ class DraftApiTests(ApiTestCase):
         self.assertEqual(first.status_code, 200, first.content)
         self.assertEqual(Report.objects.filter(user_id=self.primary.id).count(), 2)
 
-        # 但同一组别的第二支仍要被拦住（额度仍是每「组别」1，没有放开）
+        # 第三支（账号总量 2 已满）仍要被拦住
         again = self.json_request("post", "/api/primary/report/drafts", {
             "payload": self.payload(group="小学组")
         }).json()["data"]
@@ -373,7 +389,6 @@ class DraftApiTests(ApiTestCase):
             {"version": again["version"]})
         self.assertEqual(second.status_code, 409)
         self.assertEqual(second.json().get("code"), "REPORT_QUOTA_EXCEEDED")
-        self.assertIn("小学组", second.json().get("msg", ""))
         self.assertEqual(Report.objects.filter(user_id=self.primary.id).count(), 2)
 
     # ----- 回归：中小学端不得报送大学组（渠道 × 组别的归属校验）-----

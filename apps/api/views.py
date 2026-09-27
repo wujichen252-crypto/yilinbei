@@ -105,6 +105,12 @@ def report_queryset(request, current_user=None):
         qs = qs.filter(status=request.GET.get("status"))
     if request.GET.get("group") not in (None, ""):
         qs = qs.filter(group=request.GET.get("group"))
+    choir_name = request.GET.get("choir_name")
+    if choir_name:
+        qs = qs.filter(choir_name__icontains=choir_name)
+    school_name = request.GET.get("school_name")
+    if school_name:
+        qs = qs.filter(school_name__icontains=school_name)
     return qs
 
 
@@ -124,8 +130,8 @@ def create_report(request, province=False):
         with transaction.atomic():
             lock_user_slot(user.id)
             try:
-                # 按组别计配额（每校每个组别一支）：小学组、中学组可各报一支。
-                # 见 assert_report_quota 与 HaveToRead.vue 的【2026-09-23 口径变更】。
+                # 默认每校限报一支（一个组别）；can_report_twice 特许的合并办学
+                # 学校可报两支（不同组别各一支）。见 assert_report_quota。
                 assert_report_quota(user, scope, data.get("group"))
             except ReportQuotaExceeded as exc:
                 transaction.set_rollback(True)
@@ -506,15 +512,35 @@ def user_list(request):
     # 省级（4）为无效数据，admin 与 committee 展示学校（0）、市级（1）与中小学端（5）
     qs = User.objects.filter(type__in=(0, 1, User.TYPE_PRIMARY_SECONDARY)).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
+    nickname = request.GET.get("nickname")
+    if nickname: qs = qs.filter(nickname__icontains=nickname)
     return response(list_page(qs, request, user_dict))
+
+
+# 组委会/管理员重置密码：请求体带 password 字段即视为重置，无需填写新密码，一律重置为默认密码
+RESET_PASSWORD_DEFAULT = "scylb@2026"
+
+
+def _as_bool(value):
+    """勾选框入参归一化：兼容 true/false、1/0、"true"/"on" 等前端常见传值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return False
 
 
 def user_update_admin(request):
     data = body(request); user = User.all_objects.filter(pk=data.get("id")).first()
     if not user: return response(failure("用户不存在"))
+    # can_report_twice 是报名特许，只能由管理员/组委会授予，单独归一化，不能让学校自助提权
     for k in ("username", "nickname", "description", "tel", "leader", "type", "parent_id"):
         if k in data: setattr(user, k, data[k])
-    if data.get("password"): user.set_password(data["password"])
+    if "can_report_twice" in data:
+        user.can_report_twice = _as_bool(data["can_report_twice"])
+    if "password" in data: user.set_password(RESET_PASSWORD_DEFAULT)
     user.save(); write_log(request.auth, 1, "修改用户 " + user.username)
     return response(success())
 
@@ -522,6 +548,8 @@ def user_update_admin(request):
 def user_create_admin(request, committee=False):
     data = body(request); values = {k: data.get(k) for k in ("username", "nickname", "description", "tel", "leader", "type") if k in data}
     values["parent_id"] = 0
+    if "can_report_twice" in data:
+        values["can_report_twice"] = _as_bool(data["can_report_twice"])
     if committee:
         values["type"] = 0
     user = User(**values)
