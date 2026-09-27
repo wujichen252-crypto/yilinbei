@@ -10,22 +10,31 @@ from django.utils import timezone
 from .models import Files, Person, Report, ReportDraft, ReportPerson, User
 from .services import attach_report_people, store_people
 
-# 每所学校/单位可持有的（未删除）正式报名数上限；按 scope 分档：
-#   0 = 校级（高校端）、4 = 省级（历史 create_report 里的 "8" 沿用）、
-#   5 = 中小学端（原市州端 scope 1 的报名功能 2026-09-24 移植至此）。
-# 规则口径：驳回态（status=-1）与待审核态（status=0）同样占额度，
-# 只有软删除后才腾出名额，与 Report.objects（SoftDeleteManager）一致。
-# scope 1 已无写入路径（市州端只读），不再配额度。
-REPORT_QUOTA_BY_SCOPE = {0: 1, 4: 8, 5: 1}
+# 正式报名数上限（未软删；驳回态 status=-1 与待审核态 status=0 同样占额度，
+# 只有软删除后才腾出名额，与 Report.objects 的 SoftDeleteManager 一致）。
+#
+# 【2026-09-27 口径】高校端（scope 0）与中小学端（scope 5）统一回到红头文件原口径
+# 「每所学校限报一支队伍，且只能参加一个组别」；上限不再取本表，而由账号级特许
+# users.can_report_twice 决定（False=1 支，True=2 支，授予中小学合并办学的学校），
+# 见 ACCOUNT_QUOTA_SCOPES 与 assert_report_quota。
+#
+# 本表只留省级端（scope 4）——上一届西部音乐周的历史渠道，维持固定上限 8 的旧口径，
+# 特许字段不参与。scope 1（市州端）已无写入路径（只读），不配额度。
+REPORT_QUOTA_BY_SCOPE = {4: 8}
 DEFAULT_REPORT_QUOTA = 1
+
+# 走「账号总量 + 组别唯一」口径的渠道：默认每校 1 支；can_report_twice=True 时 2 支，
+# 且每个组别仍限 1 支（assert_report_group_unique）。
+ACCOUNT_QUOTA_SCOPES = (User.TYPE_SCHOOL, User.TYPE_PRIMARY_SECONDARY)
 
 # 各 scope 允许报送的组别。**未列出的 scope 一律不做组别归属校验**（保持现状）。
 #
 # 口径依据（组委会 2026-09-23 答复，前端 HaveToRead.vue §二段 2 同步记载）：
 #   · 中小学端（scope 5，原市级渠道）只能报小学组、中学组，**不得出现大学组** ——
 #     大学组归高校渠道。管乐团与铜管乐团同规则（不再按乐团类型细分）。
-#   · 「最多两支」由配额自动满足，不靠本表：本表限死 2 个组别，配额又是每组别 1 支，
-#     两者相乘即上限 2，且必然是一支小学、一支中学 —— 所以不可能出现「2 支小学组」。
+#   · 【2026-09-27 修订】默认每校只能报 1 个组别；中小学合并办学的学校经管理员
+#     授予 can_report_twice 后可报 2 支 —— 本表限死 2 个组别、账号上限为 2、
+#     每组别又限 1 支，三者相乘保证两支必然是一支小学、一支中学，不可能出现「2 支小学组」。
 #   · 两支的乐团类型互相独立（小学管乐团 + 中学铜管乐团是允许的）。后端
 #     establishment 与 group 之间**零耦合**，本来就是自由的，无需改动。
 #
@@ -122,6 +131,22 @@ def assert_group_allowed(scope, group):
     raise InvalidSubmission("%s只能报送%s，不能报送%s" % (label, "或".join(allowed), group))
 
 
+def assert_report_group_unique(user, group, exclude_report_id=None):
+    """同一学校同一组别只能持有一支（未软删）报名；驳回态同样占组别名额。
+
+    被驳回报名重新提交时可能改了组别（update_rejected_report_from_submission），
+    此时传 exclude_report_id 排除自身，只防与「另一支」撞组别。
+    """
+    if not group:
+        return
+    queryset = Report.objects.filter(user_id=user.id, group=group)
+    if exclude_report_id is not None:
+        queryset = queryset.exclude(id=exclude_report_id)
+    if queryset.exists():
+        # 点明是哪个组别满了 —— 只说「限报一支」正是用户被误导的原因
+        raise ReportQuotaExceeded("%s每所学校限报一支队伍，您已有报名记录" % group)
+
+
 def assert_report_quota(user, scope, group=None):
     """必须在 lock_user_slot 之后、同一事务内调用。
 
@@ -130,31 +155,40 @@ def assert_report_quota(user, scope, group=None):
     create_report_from_submission —— 都是新建报名的必经之路，加在这里两个入口自动覆盖，
     将来多一个调用点也不会漏。请注意函数名只说了 quota，组别校验是搭车的。
 
-    【配额的单位是「组别」，不是「账号」】
-    口径依据（不是推测，是仓库里已有的书面口径）：
-    `src/components/common/HaveToRead.vue` §二段 2 的【2026-09-23 口径变更】写得很明确 ——
-    红头文件原文是「每所学校限报一支队伍，且只能参加一个组别」，组委会后来**放宽**为
-    「每所学校**每个组别**限报一支队伍，小学组、中学组可各报一支（最多两支），
-      大学组限报一支」。同一段还要求本函数与该节**必须同步**。
+    【2026-09-27 口径：先卡账号总量，再卡组别唯一】
+    红头文件原文「每所学校限报一支队伍，且只能参加一个组别」同时适用于高校端（scope 0）
+    与中小学端（scope 5）。因此这两个渠道先做**账号总量**检查：
+      · can_report_twice=False（默认）：总量 1，报过任意组别的一支后不能再报；
+      · can_report_twice=True（管理员授予中小学合并办学的学校）：总量 2，且每个组别
+        仍限 1 支 —— 配合 scope 5 的组别白名单（小学组/中学组），两支必然各占一个组别。
+    历史上 2026-09-23~27 曾短暂放开为「每组别 1 支、组别数不限」，已收回；
+    `src/components/common/HaveToRead.vue` §二段 2 与本注释必须同步。
 
-    原先这里只按 user_id 计数、完全不看 group，于是同一所学校报完中学组就再也报不了
-    小学组 —— 页面承诺「可各报一支」，系统却回
-    `REPORT_QUOTA_EXCEEDED 每所学校限报一支队伍，您已有报名记录`，两边对不上。
-
-    group 取不到时退回账号级计数（宁严不松，不会凭空多放行一支）。
+    省级端（scope 4）及其他历史渠道维持「固定上限 + 按组别计数」的旧逻辑，
+    can_report_twice 不参与（特许只发给学校账号）。
     """
     assert_group_allowed(scope, group)
-    limit = REPORT_QUOTA_BY_SCOPE.get(scope, DEFAULT_REPORT_QUOTA)
     queryset = Report.objects.filter(user_id=user.id)
+
+    if scope in ACCOUNT_QUOTA_SCOPES:
+        account_limit = 2 if getattr(user, "can_report_twice", False) else 1
+        if queryset.count() >= account_limit:
+            if account_limit == 1:
+                message = "每所学校限报一支队伍，您已有报名记录"
+            else:
+                message = "您的单位最多可报送两支队伍，无法继续报送"
+            raise ReportQuotaExceeded(message)
+        # 总量未满：再保证同一组别不出现两支（主要拦特许学校报两支同组别）
+        assert_report_group_unique(user, group)
+        return
+
+    limit = REPORT_QUOTA_BY_SCOPE.get(scope, DEFAULT_REPORT_QUOTA)
     if group:
         queryset = queryset.filter(group=group)
     current = queryset.count()
     if current >= limit:
         if limit != 1:
             message = "目前您的单位已超报送限制,无法再继续进行报送!"
-        elif group:
-            # 点明是哪个组别满了 —— 只说「限报一支」正是用户被误导的原因
-            message = "%s每所学校限报一支队伍，您已有报名记录" % group
         else:
             message = "每所学校限报一支队伍，您已有报名记录"
         raise ReportQuotaExceeded(message)
@@ -312,7 +346,7 @@ def create_report_from_submission(user, submission, scope=None):
     外层事务，SQLite 下 select_for_update() 是空操作，属于验证盲区（见 P2-5）。
     """
     lock_user_slot(user.id)
-    # 按组别计配额（每校每个组别一支），见 assert_report_quota 的说明
+    # 默认每校 1 支；can_report_twice 特许学校 2 支且每组别 1 支，见 assert_report_quota
     assert_report_quota(user, scope, submission.report.get("group"))
     ok, stored = store_people(user, list(submission.people))
     if not ok:
@@ -325,6 +359,12 @@ def create_report_from_submission(user, submission, scope=None):
 def update_rejected_report_from_submission(user, report, submission, scope=None):
     if report.user_id != user.id or report.status != -1:
         raise ReportNotRejected("当前报名状态不允许重新提交")
+    if scope in ACCOUNT_QUOTA_SCOPES:
+        # 重新提交不新增行数，账号总量不变，无需再查；但用户可能在驳回后改了组别，
+        # 必须防止两支（特许学校）被改成同一个组别。
+        group = submission.report.get("group")
+        assert_group_allowed(scope, group)
+        assert_report_group_unique(user, group, exclude_report_id=report.id)
     ok, stored = store_people(user, list(submission.people))
     if not ok:
         raise InvalidSubmission(stored)

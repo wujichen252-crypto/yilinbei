@@ -300,7 +300,8 @@ class LegacyBcryptLoginTests(ApiTestCase):
         self.assertRegex(payload["data"]["token"], r"^\d+\|[0-9a-f]{40}$")
         self.assertEqual(payload["data"]["user"], {
             "id": user.id, "username": "legacy", "nickname": "老系统",
-            "description": "", "tel": "", "leader": "", "type": 0, "parent_id": None,
+            "description": "", "tel": "", "leader": "", "type": 0,
+            "can_report_twice": False, "parent_id": None,
         })
         self.assertTrue(PersonalAccessToken.objects.filter(tokenable_id=user.id).exists())
         user.refresh_from_db()

@@ -87,6 +87,10 @@ class User(AbstractBaseUser):
     tel = models.CharField(max_length=50, default="", blank=True, null=True)
     leader = models.CharField(max_length=50, default="", blank=True, null=True)
     type = models.IntegerField(default=0)
+    # 报名特许：默认 False = 每所学校限报一支队伍、只能参加一个组别（红头文件原口径，
+    # 高校端 type=0 与中小学端 type=5 同此默认）。True 用于中小学合并办学的学校，
+    # 允许报两支（小学组、中学组各一支；每个组别仍限一支），由管理员/组委会授予。
+    can_report_twice = models.BooleanField(default=False)
     # parent_id is used by Laravel controllers although it was absent from the
     # checked-in users migration; keeping it nullable is backwards compatible.
     parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.DO_NOTHING,

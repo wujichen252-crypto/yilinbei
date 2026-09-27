@@ -59,6 +59,7 @@ def user_dict(user):
     return {"id": user.id, "username": user.username, "nickname": user.nickname,
             "description": user.description or "", "tel": user.tel or "",
             "leader": user.leader or "", "type": user.type,
+            "can_report_twice": bool(getattr(user, "can_report_twice", False)),
             "parent_id": user.parent_id}
 
 

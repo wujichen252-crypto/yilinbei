@@ -124,8 +124,8 @@ def create_report(request, province=False):
         with transaction.atomic():
             lock_user_slot(user.id)
             try:
-                # 按组别计配额（每校每个组别一支）：小学组、中学组可各报一支。
-                # 见 assert_report_quota 与 HaveToRead.vue 的【2026-09-23 口径变更】。
+                # 默认每校限报一支（一个组别）；can_report_twice 特许的合并办学
+                # 学校可报两支（不同组别各一支）。见 assert_report_quota。
                 assert_report_quota(user, scope, data.get("group"))
             except ReportQuotaExceeded as exc:
                 transaction.set_rollback(True)
@@ -513,11 +513,25 @@ def user_list(request):
 RESET_PASSWORD_DEFAULT = "scylb@2026"
 
 
+def _as_bool(value):
+    """勾选框入参归一化：兼容 true/false、1/0、"true"/"on" 等前端常见传值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
 def user_update_admin(request):
     data = body(request); user = User.all_objects.filter(pk=data.get("id")).first()
     if not user: return response(failure("用户不存在"))
+    # can_report_twice 是报名特许，只能由管理员/组委会授予，单独归一化，不能让学校自助提权
     for k in ("username", "nickname", "description", "tel", "leader", "type", "parent_id"):
         if k in data: setattr(user, k, data[k])
+    if "can_report_twice" in data:
+        user.can_report_twice = _as_bool(data["can_report_twice"])
     if "password" in data: user.set_password(RESET_PASSWORD_DEFAULT)
     user.save(); write_log(request.auth, 1, "修改用户 " + user.username)
     return response(success())
@@ -526,6 +540,8 @@ def user_update_admin(request):
 def user_create_admin(request, committee=False):
     data = body(request); values = {k: data.get(k) for k in ("username", "nickname", "description", "tel", "leader", "type") if k in data}
     values["parent_id"] = 0
+    if "can_report_twice" in data:
+        values["can_report_twice"] = _as_bool(data["can_report_twice"])
     if committee:
         values["type"] = 0
     user = User(**values)
