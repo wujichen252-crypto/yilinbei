@@ -3,9 +3,9 @@ import json
 from django.test import TestCase
 
 from apps.core.models import Person, Report, ReportDraft, ReportPerson, User
-from apps.core.report_drafts import (REPORT_ALLOWED_GROUPS, DraftError, InvalidSubmission,
-                                     assert_group_allowed, decode_payload, encode_payload,
-                                     normalize_draft_payload)
+from apps.core.report_drafts import (PERSON_FIELDS, REPORT_ALLOWED_GROUPS, DraftError,
+                                     InvalidSubmission, assert_group_allowed, decode_payload,
+                                     encode_payload, normalize_draft_payload)
 
 from .base import ApiTestCase
 
@@ -26,6 +26,39 @@ class DraftPayloadTests(ApiTestCase):
             normalize_draft_payload({"time_length": True})
         with self.assertRaises(Exception):
             normalize_draft_payload({"file": "/tmp/file.pdf"})
+
+    def test_normalizer_accepts_null_and_positive_signature_order_only(self):
+        # 署名排序：可空；填了必须 ≥1 的整数（0/负数/字符串/小数/布尔都拒绝）
+        ok = normalize_draft_payload({"person": [
+            {"name": "甲", "card": "c1", "position": 4, "type": 1, "signature_order": 1},
+            {"name": "乙", "card": "c2", "position": 4, "type": 1},
+        ]})
+        self.assertEqual([p["signature_order"] for p in ok["person"]], [1, None])
+        for bad in (0, -1, "1", 1.5, True):
+            with self.assertRaises(DraftError):
+                normalize_draft_payload({"person": [
+                    {"name": "甲", "card": "c1", "position": 4, "type": 1,
+                     "signature_order": bad}]})
+
+    def test_normalizer_accepts_zero_display_order(self):
+        # display_order 是「指导教师」表内行下标（0 起）：0 是合法值，绝不能被当成「没有」
+        ok = normalize_draft_payload({"person": [
+            {"name": "甲", "card": "c1", "position": 2, "type": 1, "display_order": 0}]})
+        self.assertEqual(ok["person"][0]["display_order"], 0)
+
+    def test_frontend_person_keys_match_whitelist(self):
+        """前端发出的 16 个 person 键必须与 PERSON_FIELDS 完全相等。
+
+        多一个键 → 每个报名表只要有人，暂存/提交就全部 400（报错文案
+        「person[0] 存在不允许字段」用户完全看不懂）；少一个键 → 字段被静默丢。
+        前端交付方案 9.1/问题 2：这是前后端这条契约目前唯一的护栏。
+        """
+        frontend_keys = {
+            "id", "name", "card", "age", "gender", "school", "phone", "instrument",
+            "head", "major", "other", "remark", "type", "position",
+            "signature_order", "display_order",
+        }
+        self.assertEqual(frontend_keys, PERSON_FIELDS)
 
 
 class DraftApiTests(ApiTestCase):
@@ -116,6 +149,99 @@ class DraftApiTests(ApiTestCase):
         self.authorize_as(self.primary)
         result = self.client.get("/api/primary/report/drafts/%s" % created["draft_id"])
         self.assertEqual(result.status_code, 404)
+
+    # ----- 署名排序（report_person.signature_order）-------------------------
+
+    def test_person_signature_order_round_trips_through_draft(self):
+        payload = self.payload(person=[
+            {"name": "刘老师", "card": "sig-1", "age": 30, "gender": "女",
+             "position": 4, "type": 1, "signature_order": 2},
+            {"name": "陈老师", "card": "sig-2", "age": 31, "gender": "男",
+             "position": 4, "type": 1, "signature_order": 1},
+        ])
+        created = self.json_request("post", "/api/school/report/drafts", {
+            "payload": payload}).json()["data"]
+        draft = ReportDraft.objects.get(pk=int(created["draft_id"]))
+        stored = json.loads(draft.payload)["person"]
+        self.assertEqual([p["signature_order"] for p in stored], [2, 1])
+
+        submitted = self.json_request(
+            "post", "/api/school/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"]})
+        self.assertEqual(submitted.status_code, 200)
+        orders = list(ReportPerson.objects.order_by("id")
+                      .values_list("signature_order", flat=True))
+        self.assertEqual(orders, [2, 1])
+
+    def test_person_rejects_non_positive_signature_order(self):
+        for bad in (0, -1, "1"):
+            payload = self.payload(person=[
+                {"name": "刘老师", "card": "sig-1", "position": 4, "type": 1,
+                 "signature_order": bad}])
+            result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+            self.assertEqual(result.status_code, 400, "signature_order=%r 应拒绝" % bad)
+
+    def test_legacy_person_without_signature_order_still_saves(self):
+        # 旧前端不带该键：照常保存，草稿里为 null（提交后落库 NULL，导出退回提交顺序）
+        payload = self.payload(person=[
+            {"name": "刘老师", "card": "sig-1", "position": 4, "type": 1}])
+        result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+        self.assertEqual(result.status_code, 200)
+        draft = ReportDraft.objects.get(pk=int(result.json()["data"]["draft_id"]))
+        stored = json.loads(draft.payload)["person"]
+        self.assertIsNone(stored[0]["signature_order"])
+
+    # ----- 表内行下标（report_person.display_order，仅「教师+指挥」带入行有值）-----
+
+    def test_person_display_order_round_trips_and_survives_resubmission(self):
+        payload = self.payload(person=[
+            {"name": "王指挥", "card": "do-1", "age": 35, "gender": "男",
+             "position": 2, "type": 1, "signature_order": 2, "display_order": 1},
+            {"name": "李老师", "card": "do-2", "age": 30, "gender": "女",
+             "position": 4, "type": 1, "signature_order": 1},
+        ])
+        created = self.json_request("post", "/api/school/report/drafts", {
+            "payload": payload}).json()["data"]
+        stored = json.loads(ReportDraft.objects.get(
+            pk=int(created["draft_id"])).payload)["person"]
+        self.assertEqual([p["display_order"] for p in stored], [1, None])
+
+        submitted = self.json_request(
+            "post", "/api/school/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"]})
+        self.assertEqual(submitted.status_code, 200, submitted.content)
+        report_id = submitted.json()["data"]["report_id"]
+        links = {link.position: link for link in ReportPerson.objects.all()}
+        self.assertEqual(links[2].display_order, 1)   # 指挥行（教师+指挥 带入行）
+        self.assertIsNone(links[4].display_order)     # 普通指导老师行没有这个下标
+
+        # 提交后重建（edit-draft → payload_from_report）必须把 display_order 带
+        # 回来，否则「提交前灰行在第 1 行、提交后再编辑就翻成默认排最后」。
+        Report.objects.filter(pk=report_id).update(status=-1)
+        edit = self.json_request("post", "/api/school/reports/%s/edit-draft" % report_id, {})
+        self.assertEqual(edit.status_code, 200, edit.content)
+        rebuilt = {p["name"]: p for p in edit.json()["data"]["payload"]["person"]}
+        self.assertEqual(rebuilt["王指挥"]["display_order"], 1)
+        self.assertIsNone(rebuilt["李老师"]["display_order"])
+
+    def test_person_display_order_zero_is_kept_and_negative_rejected(self):
+        # 草稿路径严格校验：0 是合法行下标必须保留（不是「没有」），负数 400
+        payload = self.payload(person=[
+            {"name": "王指挥", "card": "do-0", "position": 2, "type": 1,
+             "signature_order": 2, "display_order": 0}])
+        result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+        self.assertEqual(result.status_code, 200)
+        stored = json.loads(ReportDraft.objects.get(
+            pk=int(result.json()["data"]["draft_id"])).payload)["person"]
+        self.assertEqual(stored[0]["display_order"], 0)
+
+        payload = self.payload(person=[
+            {"name": "王指挥", "card": "do-neg", "position": 2, "type": 1,
+             "display_order": -1}])
+        result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+        self.assertEqual(result.status_code, 400)
+        body = json.dumps(result.json(), ensure_ascii=False)
+        self.assertIn("不能小于 0", body)
 
     # ----- 回归：市州端只读化（2026-09-24），写入端点整体摘除而非 403 -----
     def test_city_write_routes_are_removed(self):

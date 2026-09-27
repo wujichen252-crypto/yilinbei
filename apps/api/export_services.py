@@ -134,13 +134,29 @@ def _snapshot(reports: Iterable[Report]):
     return records, grouped, users, files
 
 
+def instructor_sort_key(link):
+    """指导老师（position=4 关系行）的署名排序键：signature_order 升序；
+    未填的排在全部已填之后、按关系行 id（=提交顺序，attach_report_people
+    每次全删全插会重排 id）；同号按关系行 id。教师指挥的「固定第一署名」
+    由 adviser_instructors 在本排序之后叠加，不在这里处理。"""
+    order = getattr(link, "signature_order", None)
+    return (0, order, link.id) if order is not None else (1, 0, link.id)
+
+
 def _members(grouped, report_id):
     """Return names grouped by Laravel ``ReportPerson.position`` values."""
 
     result = defaultdict(list)
+    instructors = []
     for link, person in grouped.get(report_id, []):
-        if person is not None:
+        if person is None:
+            continue
+        if int(link.position) == 4:
+            instructors.append((instructor_sort_key(link), person))
+        else:
             result[int(link.position)].append(person)
+    if instructors:
+        result[4] = [person for _, person in sorted(instructors, key=lambda pair: pair[0])]
     return result
 
 
@@ -155,6 +171,13 @@ def _conductor_type(grouped, report_id):
     return links[0].type if len(links) == 1 else None
 
 
+def _conductor_order(grouped, report_id):
+    """指挥关系行的 signature_order；无指挥、多指挥或人物缺失时 None。"""
+    links = [link for link, person in grouped.get(report_id, [])
+             if int(link.position) == 2 and person is not None]
+    return getattr(links[0], "signature_order", None) if len(links) == 1 else None
+
+
 # --- 附件2 对齐的共用取值（与报名信息表 PDF 的 form_context 同口径） -----------
 
 def _conductor(members):
@@ -165,15 +188,24 @@ def _conductor(members):
     return name, phone
 
 
-def adviser_instructors(conductors, teachers, conductor_type):
+def adviser_instructors(conductors, teachers, conductor_type, conductor_order=None):
     """附件2 指导老师名单的行序：指挥是教师（关系行 type=1）时，官方表格的
     第一指导老师槽即指挥本人，学校另报的指导老师顺延到第 2 槽；指挥本人被
     重复提交为指导老师（同 person_id）时只渲染一次。无指挥、多指挥（历史
-    数据）或指挥非教师时原样返回。"""
+    数据）或指挥非教师时原样返回。
+
+    conductor_order 为指挥这一关系行自己的 signature_order（第十二届起学校
+    可填 1/2，见 0011 迁移）：填了号就让指挥按自己的号落位，不再无条件占第
+    一槽；为 None（本轮上线前的历史数据）或非法值时沿用「占第一槽」的旧口径，
+    因此历史报名的导出结果不变。"""
     if conductor_type != 1 or len(conductors) != 1:
         return list(teachers)
     conductor = conductors[0]
-    return [conductor] + [p for p in teachers if p.id != conductor.id]
+    rest = [p for p in teachers if p.id != conductor.id]
+    if conductor_order in (1, 2) and rest:
+        pos = min(conductor_order - 1, len(rest))
+        return rest[:pos] + [conductor] + rest[pos:]
+    return [conductor] + rest
 
 
 def _adviser_slots(teachers):
@@ -259,7 +291,8 @@ def admin_data1_rows(reports: Iterable[Report]) -> list[list]:
         formal, reserve = members.get(0, []), members.get(1, [])
         conductor_name, conductor_phone = _conductor(members)
         teachers = adviser_instructors(
-            members.get(2, []), members.get(4, []), _conductor_type(grouped, item.id))
+            members.get(2, []), members.get(4, []), _conductor_type(grouped, item.id),
+            _conductor_order(grouped, item.id))
         (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(teachers)
         meals, remark = _meal_and_remark(item)
         rows.append([
@@ -318,7 +351,8 @@ def admin_data2_rows(reports: Iterable[Report]) -> list[list]:
             instrument_counts[_instrument_bucket(getattr(person, "instrument", ""))] += 1
         conductor_name, conductor_phone = _conductor(members)
         teachers = adviser_instructors(
-            members.get(2, []), members.get(4, []), _conductor_type(grouped, item.id))
+            members.get(2, []), members.get(4, []), _conductor_type(grouped, item.id),
+            _conductor_order(grouped, item.id))
         (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(teachers)
         meals, remark = _meal_and_remark(item)
         rows.append([

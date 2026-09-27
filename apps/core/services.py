@@ -131,6 +131,37 @@ def _person_head_error(value):
     return None if valid_person_head(value) else "头像地址必须为空，且只能使用已配置 OSS/CDN 域名的 http/https 地址"
 
 
+def _signature_order(value):
+    """署名排序的宽松规整（直传 create/update_report 路径）：正整数或 None。
+
+    bool/非数字/≤0 一律归 None，不在这里新增报错面；草稿提交路径在
+    report_drafts._person 里有严格校验（非正整数直接 400）。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _display_order(value):
+    """表内行下标的宽松规整（直传 create/update_report 路径）：非负整数或 None。
+
+    bool/非数字/负数一律归 None，不在这里新增报错面；草稿提交路径在
+    report_drafts._person 里有严格校验（负数直接 400）。
+    与 _signature_order 的唯一区别：0 是合法值（下标从 0 起）。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
 def _person_item_id(item):
     """提取人员项携带的 id（草稿流是字符串、直改流可能是整数）；无效时返回 None。"""
     raw = item.get("id")
@@ -221,7 +252,9 @@ def store_people(user, people):
             person = Person.objects.create(**{k: v for k, v in values.items() if k in {
                 f.name for f in Person._meta.fields if f.name != "id"}})
         saved_by_card[card] = person
-        result.append({"person_id": person.id, "position": item.get("position", 0), "type": item.get("type", 0)})
+        result.append({"person_id": person.id, "position": item.get("position", 0), "type": item.get("type", 0),
+                       "signature_order": _signature_order(item.get("signature_order")),
+                       "display_order": _display_order(item.get("display_order"))})
     return True, result
 
 
