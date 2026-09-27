@@ -4,7 +4,7 @@ from email.header import decode_header
 from apps.api.registration_form import form_context
 from apps.core.models import Person, Report, ReportPerson
 
-from .base import ApiTestCase
+from .base import ApiTestCase, card_for
 
 
 def decode_disposition(raw):
@@ -31,7 +31,7 @@ class RegistrationFormContextTests(ApiTestCase):
 
     def add_person(self, name, position, instrument="", phone=""):
         person = Person.objects.create(name=name, user_id=self.school.id,
-                                       card=f"card-{name}", instrument=instrument,
+                                       card=card_for(name), instrument=instrument,
                                        phone=phone)
         link(self.report, person, position)
         return person

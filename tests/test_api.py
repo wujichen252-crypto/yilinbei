@@ -5,6 +5,8 @@ from django.test import TestCase
 
 from apps.core.models import Person, Report, ReportPerson, Ticket, User
 
+from .base import card_for
+
 
 class LaravelCompatibilityTests(TestCase):
     def setUp(self):
@@ -34,7 +36,7 @@ class LaravelCompatibilityTests(TestCase):
         report = {
             "choir_name": "测试团", "name": "测试曲目", "group": "大学组", "establishment": "管乐团",
             "contact_name": "联系人", "contact_phone": "13800000000", "time_length": 120,
-            "person": [{"name": "张三", "card": "510000000000000000", "position": 0, "type": 0}],
+            "person": [{"name": "张三", "card": card_for("full18"), "position": 0, "type": 0}],
         }
         result = self.post_json("/api/school/report/create", report)
         self.assertEqual(result.json()["code"], 0)
@@ -48,7 +50,7 @@ class LaravelCompatibilityTests(TestCase):
         Ticket.objects.create(type_name="测试场次", number=1)
         result = self.client.get("/api/ticket/list?type_name=测试场次")
         self.assertEqual(result.json()["code"], 0)
-        result = self.post_json("/api/ticket/make", {"ticket_id": 1, "name": "张三", "card": "1", "phone": "2"})
+        result = self.post_json("/api/ticket/make", {"ticket_id": 1, "name": "张三", "card": card_for("one"), "phone": "2"})
         self.assertEqual(result.json()["code"], 0)
-        duplicate = self.post_json("/api/ticket/make", {"ticket_id": 1, "name": "张三", "card": "1", "phone": "2"})
+        duplicate = self.post_json("/api/ticket/make", {"ticket_id": 1, "name": "张三", "card": card_for("one"), "phone": "2"})
         self.assertEqual(duplicate.json()["code"], 1)

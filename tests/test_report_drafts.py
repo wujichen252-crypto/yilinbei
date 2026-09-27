@@ -7,7 +7,7 @@ from apps.core.report_drafts import (REPORT_ALLOWED_GROUPS, DraftError, InvalidS
                                      assert_group_allowed, decode_payload, encode_payload,
                                      normalize_draft_payload)
 
-from .base import ApiTestCase
+from .base import ApiTestCase, card_for
 
 
 class DraftPayloadTests(ApiTestCase):
@@ -51,7 +51,7 @@ class DraftApiTests(ApiTestCase):
         return value
 
     def test_draft_allows_incomplete_person_role_fields(self):
-        payload = self.payload(person=[{"name": "暂未分类", "card": "draft-card"}])
+        payload = self.payload(person=[{"name": "暂未分类", "card": card_for("draft")}])
         result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()["code"], 0)

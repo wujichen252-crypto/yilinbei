@@ -9,7 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import (Files, Leader, Logs, Person, PersonalAccessToken,
-                     ReportPerson, User)
+                     ReportPerson, User, normalize_card)
 
 
 def success(msg="操作成功!", data=None):
@@ -130,63 +130,134 @@ def _person_head_error(value):
     return None if valid_person_head(value) else "头像地址必须为空，且只能使用已配置 OSS/CDN 域名的 http/https 地址"
 
 
+# Person 上不参与「原样批量拷贝」的字段：
+#   · id / created_at / updated_at —— 主键与时间戳；
+#   · name —— 走下面显式赋值，用的是已 strip 且非空的校验值，而不是 payload 原值；
+#   · user_id —— 归属单位，**只能由服务端决定**。放进来会让
+#     `POST /report {"person":[{"person_id": <他校人员>, "user_id": 999}]}`
+#     把别人的 Person 直接过户到自己名下，从而合法复用 —— 这是越权，不是便利。
+#
+# 注意 name 在这里**不等于**「客户端不可改」：新建和复用都会应用客户端提交的姓名，
+# 只是必须先过校验/清洗。真正不可改的只有 user_id。
+_PERSON_CLIENT_READONLY = {"id", "name", "user_id", "created_at", "updated_at"}
+
+
+def _person_reference(item):
+    """取出客户端显式声明的 Person 主键。返回 (True, pid_or_None) 或 (False, 错误文案)。
+
+    同时接受 `person_id` 与历史键名 `id`：前端 draftPayload.js 一直发的就是 `id`
+    （后端 PERSON_FIELDS 白名单里也只有 `id`），而新接口约定叫 person_id。
+    两个都认是为了不制造半迁移状态。
+
+    **本批内不做任何「同 card 复用同一行」的合并** —— 同一个后 6 位在这批里出现两次，
+    只要都没带 person_id，就必须老老实实建两条 Person（第 7、8 条冻结规则）。
+    """
+    raw = item.get("person_id", item.get("id"))
+    if raw in (None, ""):
+        return True, None
+    if isinstance(raw, bool):
+        # bool 是 int 的子类，True 会被当成 1 —— 那会指到 ID=1 的人身上
+        return False, "person_id 必须是正整数"
+    if isinstance(raw, int):
+        pid = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        pid = int(raw.strip())
+    else:
+        return False, "person_id 必须是正整数"
+    if pid <= 0:
+        return False, "person_id 必须是正整数"
+    return True, pid
+
+
+def _person_profile(item):
+    """Person 上可写档案字段（排除身份、归属、主键、时间戳）。"""
+    allowed = {f.name for f in Person._meta.fields} - _PERSON_CLIENT_READONLY
+    return {k: v for k, v in item.items() if k in allowed}
+
+
 @transaction.atomic
 def store_people(user, people):
-    people = people or []
-    existing_by_card = {
-        person.card: person
-        for person in Person.objects.filter(
-            card__in=[str(item.get("card", "")).strip() for item in people]
-        )
-    }
-    names_by_card = {}
+    """落地一批人员，返回 (ok, [{"person_id", "position", "type"}, ...] 或 错误文案)。
 
-    # Validate the complete batch before performing the first write. This is
-    # important because the Laravel operation is all-or-nothing even when a
-    # later member has a conflicting identity number.
+    【身份基准是 Person.id，不是 card】
+    card 现在只是「身份证后 6 位」，10^6 种取值必然碰撞，不唯一、也不能唯一。
+    所以这里**没有任何按 card 查库/合并的逻辑**：
+      · 客户端带了 person_id → 复用那一行（前提是它属于当前单位），
+        字段按本次提交更新；只有 user_id（归属单位）始终由服务端保留；
+      · 没带 person_id → 一律新建一行。哪怕同一个人（同名同后 6 位）在同一批里
+        交了两遍，也是两行 —— 这是刻意为之，不是遗漏。
+
+    【person_id 是唯一显式复用机制，且必须显式失败】
+    不存在的 id、不属于当前单位的 id，都返回明确错误；绝不静默新建，
+    也绝不把越权的 id 当没传处理 —— 后者会让越权者在毫无察觉的情况下拿到一条
+    看似成功、实则新造的人员记录。
+
+    user 参数是**生效用户**：update_report 在 on_behalf（组委会代报）时传的是
+    report.user_id，所以这里算出来的 effective_user_id 天然就是被代报单位的 id。
+    """
+    people = people or []
+    effective_user_id = getattr(user, "id", user)
+
+    # ---- 第一步：全部校验完再写第一行（保持原有的全有或全无语义）----
+    prepared = []
     for item in people:
-        card = str(item.get("card", "")).strip()
-        name = str(item.get("name", "")).strip()
-        if not card or not name:
-            return False, "身份证和姓名不能为空"
+        if not isinstance(item, dict):
+            return False, "人员数据格式不正确"
+        name = str(item.get("name") or "").strip()
+        if not name:
+            return False, "姓名不能为空"
+        ok, card = normalize_card(item.get("card"))
+        if not ok:
+            # card 校验文案里已含格式说明，拼上姓名便于用户在长表格里定位
+            return False, "%s：%s" % (name, card)
+        ok, person_id = _person_reference(item)
+        if not ok:
+            return False, "%s：%s" % (name, person_id)
         head_error = _person_head_error(item.get("head"))
         if head_error:
             return False, head_error
-        if card in names_by_card and names_by_card[card] != name:
-            return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
-        names_by_card[card] = name
-        existing = existing_by_card.get(card)
-        if existing and existing.name != name:
-            return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
+        prepared.append((item, name, card, person_id))
 
+    # ---- 第二步：显式 person_id 的存在性 + 归属校验（一次性查库，避免 N+1）----
+    referenced = {}
+    wanted = {pid for (_, _, _, pid) in prepared if pid is not None}
+    if wanted:
+        referenced = {p.id: p for p in Person.objects.filter(id__in=wanted)}
+    for (_, name, _, person_id) in prepared:
+        if person_id is None:
+            continue
+        person = referenced.get(person_id)
+        if person is None:
+            return False, "人员不存在（person_id=%s）" % person_id
+        if person.user_id != effective_user_id:
+            return False, "人员不属于当前单位"
+
+    # ---- 第三步：写入 ----
     result = []
-    saved_by_card = {}
-    for item in people:
-        card = str(item.get("card", "")).strip()
-        name = str(item.get("name", "")).strip()
-        person = saved_by_card.get(card) or existing_by_card.get(card)
-        values = dict(item)
-        values.pop("position", None)
-        values.pop("type", None)
-        values.pop("id", None)
-        if person:
-            # A global card record belongs to its established identity. A later
-            # report may refresh optional profile data, but cannot blank or
-            # reassign the non-empty identity fields.
-            values.pop("name", None)
-            values.pop("user_id", None)
+    for (item, name, card, person_id) in prepared:
+        profile = _person_profile(item)
+        profile.pop("card", None)  # 统一走下面归一后的 card，避免未校验值覆盖
+        if person_id is None:
+            person = Person.objects.create(name=name, card=card,
+                                           user_id=effective_user_id, **profile)
         else:
-            values["user_id"] = getattr(user, "id", user)
-        if person:
-            for key in {f.name for f in Person._meta.fields}:
-                if key in values:
-                    setattr(person, key, values[key])
+            person = referenced[person_id]
+            # 复用：档案字段按本次提交更新。name 单独赋值 —— 用上面校验过的
+            # 那份（已 strip），而不是原样拷贝 payload 里的值。
+            #
+            # 【name 必须跟着改，不能"保持既有值"】身份基准是 person_id；用户既然
+            # 显式点名了这一行，就是"我知道我在改谁"。姓名可能是更正错别字。
+            # 若这里不动 name，前端（draftPayload.js 对已有行发 id）改完姓名提交会
+            # **报成功但姓名没变** —— 静默丢弃用户显式提交的字段，比报错更坏。
+            # 同理也不能因为 name 与库里不一致就拒绝复用（那等于又拿 name 当身份）。
+            person.name = name
+            for key, value in profile.items():
+                setattr(person, key, value)
+            person.card = card
             person.save()
-        else:
-            person = Person.objects.create(**{k: v for k, v in values.items() if k in {
-                f.name for f in Person._meta.fields if f.name != "id"}})
-        saved_by_card[card] = person
-        result.append({"person_id": person.id, "position": item.get("position", 0), "type": item.get("type", 0)})
+        result.append({"person_id": person.id,
+                       "position": item.get("position", 0),
+                       "type": item.get("type", 0)})
     return True, result
 
 

@@ -1,6 +1,6 @@
 from apps.core.models import Crew, Files, Leader, ScanFiles
 
-from .base import ApiTestCase
+from .base import ApiTestCase, card_for
 
 
 class FileAndScanApiTests(ApiTestCase):
@@ -89,7 +89,7 @@ class LiveReportOwnershipTests(ApiTestCase):
             gender=0,
             linkman=1,
             age=40,
-            card="leader-card",
+            card=card_for("leader"),
             phone="13800000000",
         )
         self.authorize_as(self.owner)
@@ -124,7 +124,7 @@ class LiveReportOwnershipTests(ApiTestCase):
 
     def test_owner_update_replaces_children_and_resets_status(self):
         old_crew = Crew.objects.create(
-            live_report_id=self.own_report.id, name="旧成员", card="old-card"
+            live_report_id=self.own_report.id, name="旧成员", card=card_for("old")
         )
         self.own_report.status = 1
         self.own_report.save(update_fields=["status"])
@@ -141,11 +141,11 @@ class LiveReportOwnershipTests(ApiTestCase):
                         "gender": 1,
                         "linkman": 1,
                         "age": 35,
-                        "card": "new-leader",
+                        "card": card_for("new-leader"),
                         "phone": "13900000000",
                     }
                 ],
-                "crew": [{"name": "新成员", "card": "new-crew"}],
+                "crew": [{"name": "新成员", "card": card_for("new-crew")}],
             },
         )
 
@@ -156,9 +156,9 @@ class LiveReportOwnershipTests(ApiTestCase):
         self.assertFalse(Crew.objects.filter(pk=old_crew.id).exists())
         self.assertEqual(
             list(Crew.objects.filter(live_report_id=self.own_report.id).values_list("card", flat=True)),
-            ["new-crew"],
+            [card_for("new-crew")],
         )
         self.assertEqual(
             list(Leader.objects.filter(live_report_id=self.own_report.id).values_list("card", flat=True)),
-            ["new-leader"],
+            [card_for("new-leader")],
         )

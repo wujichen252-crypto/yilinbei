@@ -7,7 +7,7 @@ from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
-from .models import Files, Person, Report, ReportDraft, ReportPerson, User
+from .models import Files, Person, Report, ReportDraft, ReportPerson, User, normalize_card
 from .services import attach_report_people, store_people
 
 # 每所学校/单位可持有的（未删除）正式报名数上限；按 scope 分档：
@@ -44,7 +44,13 @@ REPORT_FIELDS = {
 }
 SERVER_FIELDS = {"user_id", "scope", "status", "report_id", "draft_id", "version",
                  "created_at", "updated_at", "submitted_at"}
-PERSON_FIELDS = {"id", "name", "card", "age", "school", "phone", "gender",
+# `id` 与 `person_id` 是同一个东西：要复用的 Person 主键。
+#   · `id` 是历史键名，前端 draftPayload.js 一直在发，payload_from_report() 回吐时也写 `id`；
+#   · `person_id` 是新接口约定的名字。
+# 两个都收（收进来后统一存在 `id` 上），否则就是半迁移状态：老前端发 `id`、
+# 新前端发 `person_id`，只能有一边能用。注意这一条是**精确白名单**，
+# 白名单里没有的键会让整个暂存/提交 400（见 draftPayload.js 里记载的那次事故）。
+PERSON_FIELDS = {"id", "person_id", "name", "card", "age", "school", "phone", "gender",
                  "major", "head", "instrument", "other", "remark", "position", "type"}
 
 # 单字段上限，与 Report 各列 max_length 对齐；未列出的字段沿用 255（大部分列宽）
@@ -220,9 +226,20 @@ def _person(item, index, complete=False):
     if unknown:
         raise DraftError("person[%s] 存在不允许字段" % index, {"fields": sorted(unknown)})
     result = {}
-    result["id"] = str(item["id"]) if item.get("id") is not None else None
+    # 统一存到 `id`：下游 store_people 只需认一个键。
+    # 两个都给时以 person_id 为准（新键名优先，避免老键残留值静默覆盖新值）。
+    reference = item.get("person_id", item.get("id"))
+    result["id"] = str(reference) if reference not in (None, "") else None
     result["name"] = _string(item.get("name"), "person[%s].name" % index, complete)
-    result["card"] = _string(item.get("card"), "person[%s].card" % index, complete)
+    card = _string(item.get("card"), "person[%s].card" % index, complete)
+    if complete:
+        # 提交时卡死后 6 位格式；暂存（complete=False）故意放行半成品，
+        # 否则用户填到一半就存不了草稿。归一（x→X）在这里做掉，
+        # 保证 payload 里存的和最终落库的完全一致。
+        ok, card = normalize_card(card)
+        if not ok:
+            raise DraftError("person[%s].card %s" % (index, card))
+    result["card"] = card
     for field in ("school", "phone", "gender", "major", "head", "instrument", "other", "remark"):
         result[field] = _string(item.get(field), "person[%s].%s" % (index, field))
     result["age"] = _integer(item.get("age"), "person[%s].age" % index)

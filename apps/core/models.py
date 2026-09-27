@@ -10,11 +10,45 @@ seed values use " " instead of "".
 """
 import hashlib
 import json
+import re
 from datetime import timedelta
 
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
+from django.core.validators import RegexValidator
 from django.db import models
 from django.utils import timezone
+
+# ---------------------------------------------------------------------------
+# 身份证后 6 位（全系统统一的 card 口径）
+#
+# 2026-09-23 起，系统内所有「身份证」字段只收**后 6 位**：5 位数字 + 1 位数字或 X。
+# 末位小写 x 由 normalize_card() 归一成大写 X（校验位大小写不敏感是身份证的既有惯例）。
+#
+# 【必须调用 normalize_card()，不要自己写 card[-6:]】
+# 直接切片会把 `12345` 这类明显残缺的输入「补」成合法值，也会把 18 位号码静默截断成
+# 一个看起来合法、实际无法与真后 6 位区分的值 —— 那是错配人员照片的来源。
+# 校验在前、归一在后，两者不可分割，所以合并成一个函数。
+CARD_PATTERN = r"^[0-9]{5}[0-9Xx]$"
+CARD_ERROR = "身份证后6位应为6位，前5位为数字，末位为数字或X"
+CARD_MAX_LENGTH = 6
+CARD_VALIDATOR = RegexValidator(CARD_PATTERN, CARD_ERROR)
+
+
+def normalize_card(value):
+    """校验并归一身份证后 6 位。返回 (True, 归一值) 或 (False, 错误文案)。
+
+    空值、空白、非字符串一律判为非法 —— 调用方必须显式处理错误，不要 fallback 成空串：
+    卡片字段是 NOT NULL 的，写入空串在 GaussDB 上会变成 NULL（见模块 docstring）。
+    """
+    if value is None:
+        return False, CARD_ERROR
+    if not isinstance(value, str):
+        value = str(value)
+    text = value.strip()
+    if not re.match(CARD_PATTERN, text):
+        return False, CARD_ERROR
+    # 前 5 位保证是数字，只需归一末位
+    return True, text[:5] + ("X" if text[5] in "xX" else text[5])
 
 
 class LegacyJSONField(models.TextField):
@@ -253,7 +287,14 @@ class Person(models.Model):
     id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=255, default=" ")
     user_id = models.IntegerField()
-    card = models.CharField(max_length=255, unique=True, default=" ")
+    # 身份证后 6 位。**故意不唯一**：同一个后 6 位对应多个真实的人是正常情况
+    # （末 6 位只有 10^6 种组合，本次改造的前提就是不拿它当身份）。
+    # 身份基准是 Person.id；复用同一个人必须由客户端显式传 person_id，
+    # 由 store_people() 授权后复用 —— 详见 apps/core/services.py。
+    #
+    # 没有 default：NOT NULL 且无默认值，逼调用方显式给值，杜绝 " " 这类占位符
+    # 重新长出来（旧 default=" " 是 GaussDB 空串当 NULL 的遗留变通，与 6 位不变量互斥）。
+    card = models.CharField(max_length=CARD_MAX_LENGTH, validators=[CARD_VALIDATOR])
     age = models.IntegerField(null=True, blank=True)
     school = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=255, null=True, blank=True)
@@ -366,7 +407,10 @@ class Crew(models.Model):
     id = models.BigAutoField(primary_key=True)
     live_report_id = models.IntegerField()
     name = models.CharField(max_length=255, default=" ")
-    card = models.CharField(max_length=255, default=" ")
+    # 身份证后 6 位，口径同 Person.card。允许为空：live 报名里工作人员可以只填姓名，
+    # 此时宁可存 NULL 也不要 " " 占位（占位符不满足 6 位不变量，还会污染导出）。
+    card = models.CharField(max_length=CARD_MAX_LENGTH, null=True, blank=True,
+                            validators=[CARD_VALIDATOR])
     age = models.IntegerField(null=True, blank=True)
     school = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=255, null=True, blank=True)
@@ -394,7 +438,9 @@ class Leader(models.Model):
     linkman = models.IntegerField(default=0)
     age = models.IntegerField(default=0)
     unit = models.CharField(max_length=255, null=True, blank=True)
-    card = models.CharField(max_length=255, default=" ")
+    # 身份证后 6 位，口径同 Person.card（见 Crew.card 的说明）
+    card = models.CharField(max_length=CARD_MAX_LENGTH, null=True, blank=True,
+                            validators=[CARD_VALIDATOR])
     phone = models.CharField(max_length=255, default=" ")
     arrival_time = models.DateField(null=True, blank=True)
     departure_time = models.DateField(null=True, blank=True)
@@ -440,7 +486,11 @@ class TicketSubscribe(models.Model):
     id = models.BigAutoField(primary_key=True)
     ticket_id = models.IntegerField()
     name = models.CharField(max_length=255, default=" ")
-    card = models.CharField(max_length=255, default=" ")
+    # 观展人身份证后 6 位，口径同 Person.card。
+    # 【不唯一，且不能当身份用】同一后 6 位可能对应多个真实观众，所以预约去重
+    # 只能按 (场次, 姓名, 后6位) 三元组，不能只看 card —— 见 views.make_ticket。
+    card = models.CharField(max_length=CARD_MAX_LENGTH, null=True, blank=True,
+                            validators=[CARD_VALIDATOR])
     phone = models.CharField(max_length=255, default=" ")
     ip = models.CharField(max_length=255, default=" ")
     code = models.CharField(max_length=255, default=" ")
@@ -461,7 +511,9 @@ class Student(models.Model):
     grade = models.CharField(max_length=255, null=True, blank=True)
     major = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=255, null=True, blank=True)
-    card = models.CharField(max_length=255, null=True, blank=True)
+    # 身份证后 6 位，口径同 Person.card
+    card = models.CharField(max_length=CARD_MAX_LENGTH, null=True, blank=True,
+                            validators=[CARD_VALIDATOR])
     batch = models.CharField(max_length=255, null=True, blank=True)
     head = models.CharField(max_length=255, null=True, blank=True)
     status = models.IntegerField(null=True, blank=True)

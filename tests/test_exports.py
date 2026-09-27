@@ -7,7 +7,7 @@ from apps.api.export_services import (
 )
 from apps.core.models import Files, Person, ReportPerson
 
-from .base import ApiTestCase
+from .base import ApiTestCase, card_for
 
 
 class ExportCompatibilityTests(ApiTestCase):
@@ -19,7 +19,7 @@ class ExportCompatibilityTests(ApiTestCase):
         self.assertEqual(seconds_to_human(61), "1分1秒")
         report = self.make_report(self.school, group="大学组", time_length=61, name1="指定曲")
         person = Person.objects.create(
-            name="正式队员", user_id=self.school.id, card="export-card", instrument="长笛"
+            name="正式队员", user_id=self.school.id, card=card_for("export"), instrument="长笛"
         )
         ReportPerson.objects.create(report_id=report.id, person_id=person.id, position=0, type=0)
         rows = report_data_rows([report])
@@ -95,7 +95,7 @@ class PdfExportTests(ApiTestCase):
     def test_export_person_returns_pdf_and_requires_auth(self):
         report = self.make_report(self.school, status=0)
         person = Person.objects.create(
-            name="正式队员", user_id=self.school.id, card="pdf-card", school="测试学校"
+            name="正式队员", user_id=self.school.id, card=card_for("pdf"), school="测试学校"
         )
         ReportPerson.objects.create(report_id=report.id, person_id=person.id, position=0, type=0)
 
