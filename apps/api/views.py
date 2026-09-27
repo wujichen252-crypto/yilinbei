@@ -1237,12 +1237,26 @@ OSS_BIZ_RULES = {
     # biz: (中文名, 大小上限字节, 允许的 content type)
     "video": ("视频", 700 * 1024 * 1024, {"video/mp4", "video/quicktime"}),
     "image": ("图片", 1 * 1024 * 1024, {"image/jpeg", "image/png"}),
+    # 师生照片（报名表参演人员/教师头像）单独一条 biz，只约束它自己。
+    # 领队头像、成员头像继续走 "image"（1MB），改这里不影响它们。
+    "student_photo": ("师生照片", 100 * 1024, {"image/jpeg", "image/png"}),
     "photo": ("照片", 20 * 1024 * 1024, {"image/jpeg", "image/tiff"}),
     "spectrum": ("曲谱", 20 * 1024 * 1024, {"application/pdf"}),
     "doc": ("文件", 20 * 1024 * 1024, {"application/pdf"}),
 }
 OSS_STS_ACTIONS = ["oss:PutObject", "oss:AbortMultipartUpload",
                    "oss:ListParts", "oss:ListMultipartUploads"]
+
+
+def _oss_limit_text(max_bytes):
+    """上限的中文文案：不足 1MB 用 KB，否则用 MB。
+
+    既有的 biz 上限都是 1MB 的整数倍，输出与改动前逐字相同；只有新增的
+    师生照片（100KB）会走 KB 分支，避免提示出现「不能超过0MB」。
+    """
+    if max_bytes < 1024 * 1024:
+        return f"{max_bytes // 1024}KB"
+    return f"{max_bytes // (1024 * 1024)}MB"
 
 
 def oss_configured():
@@ -1298,7 +1312,7 @@ def oss_token(request):
     except (TypeError, ValueError):
         return response(failure("fileSize不合法"))
     if file_size <= 0 or file_size > max_bytes:
-        return response(failure(f"{biz_name}大小不能超过{max_bytes // (1024 * 1024)}MB"))
+        return response(failure(f"{biz_name}大小不能超过{_oss_limit_text(max_bytes)}"))
     content_type = str(data.get("contentType") or "")
     if content_type not in allowed_types:
         return response(failure("不支持的文件类型"))
@@ -1342,6 +1356,7 @@ def oss_token(request):
 OSS_EXT_RULES = {
     # 代理上传按扩展名校验：浏览器对 tiff 等类型常给出空 MIME，不可靠
     "image": {".jpg", ".jpeg", ".png"},
+    "student_photo": {".jpg", ".jpeg", ".png"},
     "photo": {".jpg", ".jpeg", ".tif", ".tiff"},
     "spectrum": {".pdf"},
     "doc": {".pdf"},
@@ -1374,7 +1389,7 @@ def oss_upload(request):
         return response(failure("缺少文件"))
     biz_name, max_bytes, allowed_types = OSS_BIZ_RULES[biz]
     if f.size > max_bytes:
-        return response(failure(f"{biz_name}大小不能超过{max_bytes // (1024 * 1024)}MB"))
+        return response(failure(f"{biz_name}大小不能超过{_oss_limit_text(max_bytes)}"))
     dot = f.name.rfind(".")
     ext = f.name[dot:].lower() if dot >= 0 else ""
     if ext not in OSS_EXT_RULES[biz]:

@@ -102,6 +102,22 @@ class OssTokenTests(ApiTestCase):
         self.assertEqual(ok.json()["code"], 0)
         self.assertEqual(over.json()["code"], 1)
 
+    def test_student_photo_biz_uses_100kb_limit(self):
+        """STS 链路与代理链路共用 OSS_BIZ_RULES，师生照片在这条链路上同样是 100KB。
+
+        本链路的大小取自客户端自报的 fileSize，属既有架构（本次不修改）。
+        """
+        with mock.patch("apps.api.views._assume_oss_role",
+                        return_value=FAKE_CREDENTIALS):
+            ok = self.request_token(biz="student_photo", filename="123456.jpg",
+                                    contentType="image/jpeg", fileSize=102400)
+            over = self.request_token(biz="student_photo", filename="123456.jpg",
+                                      contentType="image/jpeg", fileSize=102401)
+        self.assertEqual(ok.json()["code"], 0)
+        self.assertEqual(over.json()["code"], 1)
+        self.assertIn("100KB", over.json()["msg"])
+        self.assertTrue(ok.json()["data"]["key"].startswith("student_photo/"))
+
     def test_requires_configuration(self):
         with override_settings(ALIYUN_OSS_ACCESS_KEY_ID="", ALIYUN_OSS_STS_ROLE_ARN=""):
             result = self.request_token()
@@ -177,6 +193,44 @@ class OssProxyUploadTests(ApiTestCase):
         payload = result.json()
         self.assertEqual(payload["code"], 1)
         self.assertIn("1MB", payload["msg"])
+
+    def test_image_still_accepts_exactly_1mb(self):
+        """回归：领队/成员头像走的 image 通道仍是 1MB，不能被师生照片的改动收紧。"""
+        result = self.post_file(content=b"x" * (1024 * 1024))
+        self.assertEqual(result.json()["code"], 0)
+
+    # --- 师生照片（biz=student_photo）：独立 100KB 上限 -------------------------
+    # 100KB = 100 * 1024 = 102400 bytes（本项目口径，非 100 * 1000）。
+
+    def test_student_photo_accepts_under_100kb(self):
+        result = self.post_file(biz="student_photo", name="123456.jpg",
+                                content=b"x" * 102399)
+        self.assertEqual(result.json()["code"], 0)
+
+    def test_student_photo_accepts_exactly_100kb(self):
+        result = self.post_file(biz="student_photo", name="123456.jpg",
+                                content=b"x" * 102400)
+        payload = result.json()
+        self.assertEqual(payload["code"], 0)
+        self.assertTrue(payload["data"]["key"].startswith("student_photo/"))
+
+    def test_student_photo_rejects_just_over_100kb(self):
+        result = self.post_file(biz="student_photo", name="123456.jpg",
+                                content=b"x" * 102401)
+        payload = result.json()
+        self.assertEqual(payload["code"], 1)
+        self.assertIn("100KB", payload["msg"])
+
+    def test_student_photo_rejects_disallowed_extension(self):
+        """师生照片沿用「JPG/PNG」类型范围，.gif 仍被拒。"""
+        result = self.post_file(biz="student_photo", name="123456.gif",
+                                content=b"x" * 1024)
+        self.assertEqual(result.json()["code"], 1)
+
+    def test_student_photo_accepts_png(self):
+        result = self.post_file(biz="student_photo", name="张三123456.png",
+                                content=b"x" * 1024)
+        self.assertEqual(result.json()["code"], 0)
 
     def test_rejects_disallowed_extension(self):
         result = self.post_file(name="evil.exe", content_type="image/png")
