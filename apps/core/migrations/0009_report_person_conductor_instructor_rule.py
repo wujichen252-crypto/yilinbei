@@ -190,15 +190,22 @@ def _statements(schema_editor, forward):
     )
 
 
+def _apply_statements(schema_editor, forward):
+    # Django 游标即使不传参数也会把 SQL 里的 % 当占位符（psycopg2 对含字面 %
+    # 的语句报 IndexError: tuple index out of range，2026-09-27 部署 #26 实测），
+    # 而 PG_RULE_FUNCTION 里 plpgsql RAISE 的格式串必须保留字面 % ——
+    # 统一在此转义成 %%，由驱动还原为 %，SQL 常量保持可读原文。
+    for sql in _statements(schema_editor, forward):
+        schema_editor.execute(sql.replace("%", "%%"))
+
+
 def apply_rule(apps, schema_editor):
     _soft_delete_duplicate_conductors(apps)
-    for sql in _statements(schema_editor, forward=True):
-        schema_editor.execute(sql)
+    _apply_statements(schema_editor, forward=True)
 
 
 def drop_rule(apps, schema_editor):
-    for sql in _statements(schema_editor, forward=False):
-        schema_editor.execute(sql)
+    _apply_statements(schema_editor, forward=False)
 
 
 class Migration(migrations.Migration):
