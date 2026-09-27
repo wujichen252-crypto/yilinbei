@@ -214,9 +214,16 @@ def form_context(report):
     # 附件2 口径：指挥是教师（关系行 type=1）时，第一指导老师槽即指挥本人，
     # 学校另报的指导老师顺延到第 2 槽（与后台报名数据导出同口径）
     link_types = {x.person_id: x.type for x in links}
+    # 本轮新增：指挥关系行自己的署名排序（links 里 position=2 且 person_id 匹配的那条）
+    conductor_order = next(
+        (x.signature_order for x in links
+         if x.position == 2 and conductors and x.person_id == conductors[0].id),
+        None,
+    )
     teachers = adviser_instructors(
         conductors, teachers,
-        link_types.get(conductors[0].id) if len(conductors) == 1 else None)
+        link_types.get(conductors[0].id) if len(conductors) == 1 else None,
+        conductor_order)
 
     user = User.objects.filter(pk=report.user_id).first()
     school = report.school_name or getattr(user, "nickname", "") or ""

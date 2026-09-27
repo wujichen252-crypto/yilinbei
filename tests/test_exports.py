@@ -128,6 +128,41 @@ class AdminExportAppendixAlignmentTests(ApiTestCase):
         self.assertEqual(row[6], "老师甲")                 # 槽1 = 最小序号
         self.assertEqual(row[8], "老师丙、老师丁")          # 槽2 = 无号者按提交顺序
 
+    # --- 指挥按自己的署名序号落位（不再无条件占第 1 槽）---------------------
+
+    def add_conductor(self, report, name, phone, signature_order=None):
+        person = Person.objects.create(name=name, user_id=self.school.id,
+                                       card=f"card-{name}", phone=phone)
+        ReportPerson.objects.create(report_id=report.id, person_id=person.id,
+                                    position=2, type=1, signature_order=signature_order)
+        return person
+
+    def test_teacher_conductor_with_signature_order_2_lands_second_slot(self):
+        # 指挥填了序号 2：让位给序号 1 的老师，自己落第 2 槽（data1/data2 同口径）
+        report = self.make_report(self.school, choir_name="指挥落位团队", dinner_reservation=[])
+        self.add_conductor(report, "王指挥", "13900000021", signature_order=2)
+        self.add_instructor(report, "陈老师", "13900000023", signature_order=1)
+        row = admin_data1_rows([report])[1]
+        self.assertEqual(row[6:10], ["陈老师", "13900000023", "王指挥", "13900000021"])
+        row2 = admin_data2_rows([report])[1]
+        self.assertEqual(row2[8:12], ["陈老师", "13900000023", "王指挥", "13900000021"])
+
+    def test_teacher_conductor_with_signature_order_1_stays_first(self):
+        # 序号 1 → 第 1 槽：与旧的「教师指挥固定占第 1 槽」结果一致，依据从身份换成序号
+        report = self.make_report(self.school, choir_name="指挥落位团队", dinner_reservation=[])
+        self.add_conductor(report, "王指挥", "13900000021", signature_order=1)
+        self.add_instructor(report, "陈老师", "13900000023", signature_order=2)
+        row = admin_data1_rows([report])[1]
+        self.assertEqual(row[6:10], ["王指挥", "13900000021", "陈老师", "13900000023"])
+
+    def test_teacher_conductor_without_signature_order_still_first(self):
+        # 老数据（指挥没填序号）：保持「占第 1 槽」的原口径，其余老师顺延
+        report = self.make_report(self.school, choir_name="指挥落位团队", dinner_reservation=[])
+        self.add_conductor(report, "王指挥", "13900000021")
+        self.add_instructor(report, "陈老师", "13900000023", signature_order=1)
+        row = admin_data1_rows([report])[1]
+        self.assertEqual(row[6:10], ["王指挥", "13900000021", "陈老师", "13900000023"])
+
 
 class ExportCompatibilityTests(ApiTestCase):
     def setUp(self):

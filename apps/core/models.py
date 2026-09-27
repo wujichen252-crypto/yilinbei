@@ -282,6 +282,7 @@ class ReportPerson(models.Model):
     position = models.IntegerField()
     type = models.IntegerField()
     signature_order = models.IntegerField(null=True, blank=True)
+    display_order = models.IntegerField(null=True, blank=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

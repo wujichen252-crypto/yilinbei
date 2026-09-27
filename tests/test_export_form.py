@@ -154,6 +154,16 @@ class RegistrationFormContextTests(ApiTestCase):
 
         self.assertEqual(ctx["teacher_lines"], ["1. 王指挥", "2. 陈老师", "3. 刘老师"])
 
+    def test_teacher_conductor_with_signature_order_2_lands_second(self):
+        # 指挥自己填了署名序号 2：按号落位到第 2 行，不再无条件占第一行（与后台导出同口径）
+        self.add_person("王指挥", 2, phone="13900000001", type=1, signature_order=2)
+        self.add_person("刘老师", 4, phone="13900000002", signature_order=2)
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 陈老师", "2. 王指挥", "3. 刘老师"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000003", "13900000001", "13900000002"])
+
     def test_meal_slots_accept_index_label_and_abbreviation(self):
         self.report.dinner_reservation = [0, "11月21日晚餐", "22午"]
         self.report.save(update_fields=["dinner_reservation"])
