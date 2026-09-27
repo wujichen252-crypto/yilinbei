@@ -1,9 +1,11 @@
+import json
 from unittest.mock import patch
 
 from django.db import IntegrityError
 from django.test import override_settings
 
-from apps.core.models import Person, Report, ReportPerson
+from apps.core.models import Person, Report, ReportDraft, ReportPerson
+from apps.core.report_drafts import encode_payload
 from apps.core.services import valid_person_head
 
 from .base import ApiTestCase, card_for
@@ -270,8 +272,8 @@ class RejectedReportEditPeopleTests(ApiTestCase):
             item["person_id"] = person.id
         return item
 
-    def test_echo_shape_updates_in_place_and_deletes(self):
-        # 详情回显形整单提交：改张三身份证后 6 位 + 删王五
+    def test_echo_shape_updates_in_place_and_unlinks(self):
+        # 详情回显形整单提交：改张三身份证后 6 位 + 从本报名移除王五
         payload = self.payload(person=[
             self.echo_item("张三", card=card_for("rej-zhang-new")),
             self.echo_item("李四"),
@@ -283,7 +285,8 @@ class RejectedReportEditPeopleTests(ApiTestCase):
         zhang = self.people["张三"]
         zhang.refresh_from_db()
         self.assertEqual(zhang.card, card_for("rej-zhang-new"))  # 原地更新，行 id 不变
-        self.assertFalse(Person.objects.filter(name="王五").exists())   # 删除落地
+        # 移除的是「报名与人的关联」，不是「人」本身：王五的 Person 必须留着
+        self.assertTrue(Person.objects.filter(pk=self.people["王五"].id).exists())
         self.report.refresh_from_db()
         self.assertEqual(self.report.status, 0)              # 驳回态随重提复位
         active = ReportPerson.objects.filter(report_id=self.report.id)
@@ -309,8 +312,8 @@ class RejectedReportEditPeopleTests(ApiTestCase):
         self.assertEqual(self.report.status, -1)             # 连状态都没动
 
     def test_update_without_person_ids_recreates_people(self):
-        # 不带 id 的既定口径（后六位、无查重）：一律新建，不再被引用的旧行由
-        # 孤儿清理回收。行 id 会变 —— 前端想保住行 id 就必须回传 Person id。
+        # 不带 id 的既定口径（后六位、无查重）：一律新建，旧行只是**不再被本报名
+        # 引用**，并不删除。行 id 会变 —— 前端想保住行 id 就必须回传 Person id。
         payload = self.payload(person=[
             {"name": "张三", "card": card_for("rej-zhang"), "position": 0, "type": 0},
             {"name": "李四", "card": card_for("rej-li"), "position": 2, "type": 1},
@@ -319,8 +322,9 @@ class RejectedReportEditPeopleTests(ApiTestCase):
         result = self.json_request("put", "/api/committee/report/update", payload)
 
         self.assertEqual(result.json()["code"], 0)
-        self.assertFalse(Person.objects.filter(name="王五").exists())
-        self.assertFalse(Person.objects.filter(pk=self.people["张三"].id).exists())
+        # 旧 Person 全部保留（王五被移出本报名、张三换了新行，两者本人都不删）
+        self.assertTrue(Person.objects.filter(pk=self.people["王五"].id).exists())
+        self.assertTrue(Person.objects.filter(pk=self.people["张三"].id).exists())
         active = ReportPerson.objects.filter(report_id=self.report.id)
         self.assertEqual({Person.objects.get(pk=l.person_id).name for l in active},
                          {"张三", "李四"})
@@ -348,6 +352,129 @@ class RejectedReportEditPeopleTests(ApiTestCase):
         self.assertNotEqual(zhang.card, "110101")             # 尤其不能变成前 6 位
         self.assertTrue(Person.objects.filter(name="王五").exists())   # 整单未落库
         self.assertEqual(self.report.status, -1)
+
+
+class RemovedPersonIsRetainedTests(ApiTestCase):
+    """【P1-1 回归】从报名里移除人员只解除关联，**绝不删除 Person**。
+
+    Person 的身份基准是 Person.id，person_id 是客户端可长期持有、跨报名复用的
+    显式引用（见 store_people）。旧的孤儿清理会在「该人员不再被任何报名引用」时
+    物理删除 Person 行 —— 但 Person 没有软删除字段（只有 created_at/updated_at），
+    全库也没有任何 ForeignKey 指向它，所以删除不可逆、不会被数据库拦下，还会连带
+    丢掉 phone/school/head/instrument 等档案，并使草稿/回显里持有的 person_id
+    变成悬空引用。本组把新口径钉死：ReportPerson 软删，Person 保留。
+    """
+
+    def setUp(self):
+        self.school = self.create_user("retain-school", 0)
+        self.committee = self.create_user("retain-committee", 2)
+        self.authorize_as(self.committee)
+
+    def make_link(self, report, name, card, position=0, ptype=0, **profile):
+        person = Person.objects.create(name=name, card=card,
+                                       user_id=self.school.id, **profile)
+        link = ReportPerson.objects.create(report_id=report.id, person_id=person.id,
+                                           position=position, type=ptype)
+        return person, link
+
+    def edit_payload(self, report, person):
+        """驳回后编辑：payload 里列出的人员即编辑后的全集，其余视为被移除。"""
+        return {
+            "id": report.id, "choir_name": "保留团队", "name": "保留节目",
+            "group": "大学组", "establishment": "管乐团", "contact_name": "联系人",
+            "contact_phone": "13800000000", "time_length": 120,
+            "person": person,
+        }
+
+    def test_removing_the_only_reference_keeps_the_person(self):
+        """场景 1：唯一引用被移除 → 关联消失，Person 保留。"""
+        report = self.make_report(self.school, status=-1, remark="驳回：信息有误")
+        person, link = self.make_link(report, "张三", card_for("retain-solo"),
+                                      phone="13900000001")
+
+        result = self.json_request("put", "/api/committee/report/update",
+                                   self.edit_payload(report, []))
+
+        self.assertEqual(result.json()["code"], 0)
+        # 关联已解除（活跃视图看不到；底层行只被软删，未被物理删除）
+        self.assertFalse(ReportPerson.objects.filter(pk=link.id).exists())
+        self.assertIsNotNone(ReportPerson.all_objects.get(pk=link.id).deleted_at)
+        # Person 仍在，档案未丢
+        person.refresh_from_db()
+        self.assertEqual(person.name, "张三")
+        self.assertEqual(person.phone, "13900000001")
+
+    def test_removed_person_is_still_reusable_by_person_id(self):
+        """场景 2：移除后仍可用显式 person_id 复用，且 id/card/name/phone 全不变。
+
+        复用走报名表的第二次编辑（不新建报名，避开学校「限报一支」的配额闸口）。
+        """
+        r1 = self.make_report(self.school, status=-1, remark="驳回：信息有误")
+        person, _ = self.make_link(r1, "赵六", card_for("retain-reuse"),
+                                   phone="13900000002")
+        before = (person.id, person.card, person.name, person.phone)
+        r2 = self.make_report(self.school, status=-1, choir_name="复用团队",
+                              remark="驳回：信息有误")
+        other, _ = self.make_link(r2, "钱七", card_for("retain-other"), position=2,
+                                  ptype=1)
+
+        removed = self.json_request("put", "/api/committee/report/update",
+                                    self.edit_payload(r1, []))
+        self.assertEqual(removed.json()["code"], 0)
+        self.assertTrue(Person.objects.filter(pk=person.id).exists())
+
+        # 另一张报名表显式带上 person_id → 复用同一行
+        reused = self.json_request("put", "/api/committee/report/update",
+                                   self.edit_payload(r2, [
+            {"person_id": other.id, "name": "钱七", "card": other.card,
+             "position": 2, "type": 1},
+            {"person_id": person.id, "name": "赵六", "card": person.card,
+             "phone": "13900000002", "position": 0, "type": 0},
+        ]))
+
+        self.assertEqual(reused.json()["code"], 0)
+        person.refresh_from_db()
+        self.assertEqual((person.id, person.card, person.name, person.phone), before)
+        self.assertEqual(Person.objects.filter(pk=person.id).count(), 1)   # 未新建
+        self.assertTrue(ReportPerson.objects.filter(report_id=r2.id,
+                                                    person_id=person.id).exists())
+
+    def test_person_referenced_by_another_report_survives(self):
+        """场景 3：R1/R2 同时引用 P，移除 R1 的引用不影响 R2 与 P。"""
+        r1 = self.make_report(self.school, status=-1, remark="驳回：信息有误")
+        r2 = self.make_report(self.school, choir_name="第二张团队")
+        person, link1 = self.make_link(r1, "孙七", card_for("retain-multi"),
+                                       phone="13900000003")
+        link2 = ReportPerson.objects.create(report_id=r2.id, person_id=person.id,
+                                            position=0, type=0)
+
+        result = self.json_request("put", "/api/committee/report/update",
+                                   self.edit_payload(r1, []))
+
+        self.assertEqual(result.json()["code"], 0)
+        self.assertFalse(ReportPerson.objects.filter(pk=link1.id).exists())   # R1 解除
+        self.assertTrue(ReportPerson.objects.filter(pk=link2.id).exists())    # R2 保留
+        self.assertTrue(Person.objects.filter(pk=person.id).exists())         # P 保留
+
+    def test_draft_person_id_stays_resolvable_after_removal(self):
+        """场景 4：草稿里持有的 person_id 不因「报名移除该人」而失效。"""
+        report = self.make_report(self.school, status=-1, remark="驳回：信息有误")
+        person, _ = self.make_link(report, "周八", card_for("retain-draft"),
+                                   phone="13900000004")
+        draft = ReportDraft.objects.create(
+            user_id=self.school.id, scope=ReportDraft.SCOPE_SCHOOL,
+            payload=encode_payload({"person": [{"id": str(person.id), "name": "周八"}]}),
+        )
+        held_id = int(json.loads(draft.payload)["person"][0]["id"])
+
+        result = self.json_request("put", "/api/committee/report/update",
+                                   self.edit_payload(report, []))
+
+        self.assertEqual(result.json()["code"], 0)
+        # 草稿仍能把 person_id 解析回同一个 Person
+        self.assertTrue(Person.objects.filter(pk=held_id).exists())
+        draft.refresh_from_db()
+        self.assertEqual(int(json.loads(draft.payload)["person"][0]["id"]), person.id)
 
 
 @override_settings(

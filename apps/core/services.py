@@ -345,9 +345,6 @@ def store_people(user, people):
 
 
 def attach_report_people(report_id, result):
-    # 重新提交前本报名的活跃关联人员（软删前留存，供下面清理比对）。
-    old_ids = set(ReportPerson.objects.filter(report_id=report_id)
-                  .values_list("person_id", flat=True))
     ReportPerson.all_objects.filter(report_id=report_id).update(deleted_at=timezone.now())
     links = []
     for item in result:
@@ -358,32 +355,15 @@ def attach_report_people(report_id, result):
             values["person_id"] = values.pop("id")
         links.append(ReportPerson(report_id=report_id, **values))
     ReportPerson.objects.bulk_create(links)
-    # 清理「本次被移除、且不再被任何报名（活跃关联）引用」的人员记录。
+    # 只解除本报名与人员的关联，**不删除 Person**。
     #
-    # ⚠️【合并遗留，待决策 —— 见冲突解决报告 §7】本段来自 master，其原注释写的是
-    # 「Person 是全局人员库（card 唯一）」——**该前提在身份证后 6 位口径下已经不成立**：
-    # card 现在允许重复、不再标识身份，Person 的身份基准是 Person.id，且 person_id 是
-    # 客户端可以长期持有并跨报名复用的显式引用（见 store_people 的 docstring）。
-    #
-    # 审计事实（已在本次合并中逐项核实）：
-    #   · 全库**没有任何 ForeignKey / OneToOne / ManyToMany 指向 Person**，
-    #     report_person.person_id 只是一个普通 IntegerField（无 FK、无 on_delete），
-    #     因此这里 .delete() 不会级联删除任何其他表的数据；
-    #   · 反过来说，删掉 Person 行**也不会被数据库拦下**：report_person.person_id
-    #     以及 ReportDraft.payload 里 JSON 存的 person[].id 会变成悬空引用；
-    #   · Person 没有软删除字段（只有 created_at/updated_at），所以这个删除不可逆，
-    #     该行的 phone/school/head/instrument 等档案数据一并永久丢失。
-    # 具体后果（可复现路径）：同一单位的报名表 A 重提交时删掉了张三 → 张三这行 Person
-    # 被硬删 → 用户在**另一张报名表的草稿**（或先前回显/导出的 payload）里持有的
-    # person_id 再提交时报「人员不存在（person_id=N）」。这是显式失败、不是静默错配，
-    # 但与「person_id 是可长期持有的身份锚点」这一 zyr 语义存在张力。
-    # 是否保留本段由业务决定，本次合并**未改动其行为**，只把注释改成事实。
-    new_ids = {item.get("person_id", item.get("id")) for item in result}
-    for pid in old_ids - new_ids:
-        if pid is None:
-            continue
-        if not ReportPerson.objects.filter(person_id=pid).exists():
-            Person.objects.filter(pk=pid).delete()
+    # 「从某张报名里移除某人」≠「删除这个人」：Person 的身份基准是 Person.id，
+    # 且 person_id 是客户端可长期持有、跨报名复用的显式引用（见 store_people）。
+    # 原先此处会在「该人员不再被任何报名引用」时物理删除 Person 行 ——
+    # 但全库没有任何 ForeignKey 指向 Person（report_person.person_id 只是普通
+    # IntegerField），删除既不会被拦下，也因 Person 无软删除字段而不可逆，
+    # 会连带丢掉 phone/school/head/instrument 等档案，并使草稿/回显里持有的
+    # person_id 变成悬空引用。该行为已废除：Person 一律保留。
 
 
 # Violations of the report_person conductor/instructor rule (migration 0007:
