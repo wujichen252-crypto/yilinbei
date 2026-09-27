@@ -262,7 +262,9 @@ class Person(models.Model):
     id = models.BigAutoField(primary_key=True)
     name = models.CharField(max_length=255, default=" ")
     user_id = models.IntegerField()
-    card = models.CharField(max_length=255, unique=True, default=" ")
+    # 身份证后六位（2026-09-27 口径：不再收 18 位全号，写入时 18 位自动截断）。
+    # 不设任何唯一约束、不做身份查重 —— 后六位跨人重复完全放行。
+    card = models.CharField(max_length=255, default=" ")
     age = models.IntegerField(null=True, blank=True)
     school = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=255, null=True, blank=True)
