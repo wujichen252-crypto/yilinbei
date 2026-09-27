@@ -23,7 +23,39 @@
 #     即时校验与最终状态校验等价，标准流程不会被误伤。软删只改 deleted_at 时
 #     计数只减不增，同样安全。
 #   - 反向操作完整回滚（DROP 触发器/函数/索引）。
+#   - 建唯一索引前先清洗历史脏数据：生产库存在「一单多条活跃指挥」的旧数据
+#     （2026-09-24 部署 #17-#25 实测：report 9 有 2 条活跃指挥，CREATE UNIQUE
+#     INDEX 报 UniqueViolation，迁移原子回滚导致每次发布都卡死在 migrate）。
+#     清洗策略：每单保留最早一条活跃指挥（MIN(id)=先填报者），其余软删——
+#     数据可人工恢复，且与上面第 1 条业务口径一致。0009 在生产从未成功应用，
+#     原地补充该步骤是安全的；已应用过本迁移的开发库不会重跑，如同样有脏数据
+#     需自行执行等价清洗。
 from django.db import migrations
+
+
+def _soft_delete_duplicate_conductors(apps):
+    """CONDUCTOR_INDEX 的前置数据清洗：每单只保留最早一条活跃指挥（详见文件头）。"""
+    from django.db.models import Min
+    from django.utils import timezone
+
+    ReportPerson = apps.get_model("core", "ReportPerson")
+    live = ReportPerson.objects.filter(position=2, deleted_at__isnull=True).order_by()
+    keep_ids = list(
+        live.values_list("report_id")
+        .annotate(earliest=Min("id"))
+        .values_list("earliest", flat=True)
+    )
+    dupes = live.exclude(id__in=keep_ids)
+    removed = list(
+        dupes.values_list("report_id", "person_id", "id").order_by("report_id", "id")
+    )
+    if not removed:
+        print("指挥数据检查：无重复活跃指挥，无需清洗。")
+        return
+    dupes.update(deleted_at=timezone.now())
+    print("指挥数据清洗：历史数据存在一单多条活跃指挥，已按「保留最早一条」软删多余行（可人工恢复）：")
+    for report_id, person_id, link_id in removed:
+        print("  report %s：软删 report_person %s（person_id=%s）" % (report_id, link_id, person_id))
 
 # 前置支撑索引：触发器按 report_id 聚合，report_person 原有索引只覆盖 person_id。
 SUPPORT_INDEX = "CREATE INDEX report_person_report_id_idx ON report_person (report_id);"
@@ -159,6 +191,7 @@ def _statements(schema_editor, forward):
 
 
 def apply_rule(apps, schema_editor):
+    _soft_delete_duplicate_conductors(apps)
     for sql in _statements(schema_editor, forward=True):
         schema_editor.execute(sql)
 
