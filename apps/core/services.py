@@ -170,78 +170,58 @@ def _person_item_id(item):
     return int(text) if text.isdigit() else None
 
 
+# 18 位居民身份证（前 17 位数字 + 末位数字或 X/x）。不含校验位验算，与前端口径一致。
+_CARD18_RE = re.compile(r"^\d{17}[\dXx]$")
+
+
+def _normalize_card(value):
+    """身份证后六位口径（2026-09-27 起）：18 位全号自动截为后六位，其余 strip 原样。
+
+    迁移 0013 已把历史 18 位归一化成后六位；这里对写入路径做同样处理，
+    让旧页面/导入模板传上来的全号在落库前就统一成后六位。
+    """
+    card = str(value if value is not None else "").strip()
+    if _CARD18_RE.match(card):
+        return card[-6:]
+    return card
+
+
 @transaction.atomic
 def store_people(user, people):
     people = people or []
-    # 带有效 id 的项优先按 id 匹配原记录（编辑场景：原地修正身份证号、姓名等字段，
-    # 不再"改号即新增"）；不带 id 的项沿用"按身份证号查重复用/新建"的旧逻辑。
+    # 2026-09-27 口径：身份证只收后六位（18 位自动截断）、允许重复，不做任何
+    # 身份查重 —— 带 id 的项按 id 原地更新（编辑流），不带 id 的一律新建；
+    # 重提交后不再被引用的旧记录由 attach_report_people 的孤儿清理回收。
     ids = [pid for pid in (_person_item_id(item) for item in people) if pid is not None]
     existing_by_id = {person.id: person for person in Person.objects.filter(id__in=ids)}
-    existing_by_card = {
-        person.card: person
-        for person in Person.objects.filter(
-            card__in=[str(item.get("card", "")).strip() for item in people]
-        )
-    }
-    items_by_card = {}
-    for item in people:
-        items_by_card.setdefault(str(item.get("card", "")).strip(), []).append(item)
-    names_by_card = {}
 
-    # Validate the complete batch before performing the first write. This is
-    # important because the Laravel operation is all-or-nothing even when a
-    # later member has a conflicting identity number.
+    # 校验整批前置：任何一项不合法就整批不写（与 Laravel 全有或全无一致）。
     for item in people:
-        card = str(item.get("card", "")).strip()
+        card = _normalize_card(item.get("card"))
         name = str(item.get("name", "")).strip()
         if not card or not name:
             return False, "身份证和姓名不能为空"
         head_error = _person_head_error(item.get("head"))
         if head_error:
             return False, head_error
-        if card in names_by_card and names_by_card[card] != name:
-            return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
-        names_by_card[card] = name
-
         pid = _person_item_id(item)
-        if pid is not None:
-            person = existing_by_id.get(pid)
-            if person is None:
-                return False, "人员不存在或已被删除，请刷新页面后重新提交"
-            if card != person.card:
-                # 修改了身份证号：新号只要被库中其他人员占用（不论同名与否）一律拒绝，
-                # 杜绝"撞库静默合并/覆盖他人资料"。
-                if Person.objects.filter(card=card).exclude(pk=person.id).exists():
-                    return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
-                # 新号与本批次其他人员（不同 id 或未带 id 的新增项）冲突。
-                for other in items_by_card.get(card, []):
-                    if other is not item and _person_item_id(other) != pid:
-                        return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
-        else:
-            existing = existing_by_card.get(card)
-            if existing and existing.name != name:
-                return False, f"{card}-{name},该身份证已被使用，请检查您的身份证和姓名是否输入正确"
+        if pid is not None and pid not in existing_by_id:
+            return False, "人员不存在或已被删除，请刷新页面后重新提交"
 
     result = []
-    saved_by_card = {}
     for item in people:
-        card = str(item.get("card", "")).strip()
+        card = _normalize_card(item.get("card"))
         pid = _person_item_id(item)
         person = existing_by_id.get(pid) if pid is not None else None
-        by_id = person is not None
-        if not by_id:
-            person = saved_by_card.get(card) or existing_by_card.get(card)
         values = dict(item)
+        # 18 位全号在此统一截为后六位（与迁移 0013 的历史归一化配套）。
+        values["card"] = card
         values.pop("position", None)
         values.pop("type", None)
         values.pop("id", None)
         if person:
             # 归属（user_id）与创建时间不可被提交数据改写。
             values.pop("user_id", None)
-            if not by_id:
-                # 按 card 复用全局人员库记录（无 id 的新增项）：该记录属于既有身份，
-                # 姓名不可被本次提交改写；按 id 命中的是自己报名里的人员，允许修正姓名。
-                values.pop("name", None)
             for key in {f.name for f in Person._meta.fields}:
                 if key in values:
                     setattr(person, key, values[key])
@@ -250,7 +230,6 @@ def store_people(user, people):
             values["user_id"] = getattr(user, "id", user)
             person = Person.objects.create(**{k: v for k, v in values.items() if k in {
                 f.name for f in Person._meta.fields if f.name != "id"}})
-        saved_by_card[card] = person
         result.append({"person_id": person.id, "position": item.get("position", 0), "type": item.get("type", 0),
                        "signature_order": _signature_order(item.get("signature_order")),
                        "display_order": _display_order(item.get("display_order"))})

@@ -27,13 +27,12 @@ class ReportTransactionAndSoftDeleteTests(ApiTestCase):
         return payload
 
     def test_failed_create_rolls_back_people_created_earlier_in_request(self):
-        Person.objects.create(
-            name="原姓名", card="conflict-card", user_id=self.school.id
-        )
+        # 身份查重已取消（后六位允许重复、不复用不拒绝）：改用「后一项身份证为空」
+        # 触发整批前置校验失败，验证任何一项不合法时全批不落库
         payload = self.report_payload(
             person=[
                 {"name": "先创建", "card": "new-card", "position": 0, "type": 0},
-                {"name": "错误姓名", "card": "conflict-card", "position": 1, "type": 0},
+                {"name": "后创建", "card": " ", "position": 1, "type": 0},
             ]
         )
 
@@ -52,15 +51,13 @@ class ReportTransactionAndSoftDeleteTests(ApiTestCase):
         old_link = ReportPerson.objects.create(
             report_id=report.id, person_id=old_person.id, position=0, type=0
         )
-        Person.objects.create(
-            name="身份证本人", card="conflict-card", user_id=self.school.id
-        )
+        # 身份查重已取消：改用「后一项身份证为空」触发失败
         payload = self.report_payload(
             id=report.id,
             name="不应保存的新节目名",
             person=[
                 {"name": "临时成员", "card": "temporary-card", "position": 0, "type": 0},
-                {"name": "姓名不符", "card": "conflict-card", "position": 1, "type": 0},
+                {"name": "缺身份证", "card": " ", "position": 1, "type": 0},
             ],
         )
 
@@ -201,8 +198,10 @@ class PersonHeadAndIdentityTests(ApiTestCase):
         self.assertFalse(Report.objects.exists())
         self.assertFalse(Person.objects.filter(card="invalid-head-card").exists())
 
-    def test_reused_card_keeps_original_identity_but_refreshes_optional_fields(self):
-        person = Person.objects.create(
+    def test_same_card_from_another_school_creates_independent_record(self):
+        # 身份查重已取消：同卡号（后六位）被另一学校提交 → 新建独立记录，
+        # 原记录（含归属学校）原样保留，不再复用/刷新
+        original = Person.objects.create(
             name="身份证本人", card="reused-card", user_id=self.other_school.id,
             phone="old-phone",
         )
@@ -215,11 +214,14 @@ class PersonHeadAndIdentityTests(ApiTestCase):
         ))
 
         self.assertEqual(result.json()["code"], 0)
-        person.refresh_from_db()
-        self.assertEqual(person.name, "身份证本人")
-        self.assertEqual(person.user_id, self.other_school.id)
-        self.assertEqual(person.phone, "new-phone")
-        self.assertEqual(person.head, "https://avatars.example.com/a.png")
+        original.refresh_from_db()
+        self.assertEqual(original.user_id, self.other_school.id)
+        self.assertEqual(original.phone, "old-phone")
+        self.assertFalse(original.head)
+        created = Person.objects.get(card="reused-card", user_id=self.school.id)
+        self.assertNotEqual(created.id, original.id)
+        self.assertEqual(created.phone, "new-phone")
+        self.assertEqual(created.head, "https://avatars.example.com/a.png")
 
     def test_admin_person_update_rejects_invalid_head(self):
         person = Person.objects.create(
