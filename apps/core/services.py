@@ -63,6 +63,18 @@ def user_dict(user):
             "parent_id": user.parent_id}
 
 
+def subordinate_school_ids(city_user):
+    """归属于该市州账号的中小学账号（type=5）id 列表。
+
+    市州端查看下级学校报名情况的统一数据范围来源：parent_id 指向该市州账号。
+    """
+    return list(
+        User.objects.filter(
+            parent_id=city_user.id, type=User.TYPE_PRIMARY_SECONDARY
+        ).values_list("id", flat=True)
+    )
+
+
 def list_page(queryset, request, serializer=model_dict):
     try:
         limit = max(1, int(request.GET.get("limit", 10)))
