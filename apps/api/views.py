@@ -35,9 +35,10 @@ from apps.core.report_drafts import (
     update_draft, update_rejected_report_from_submission,
 )
 from apps.core.services import (BodyError, attach_report_people, failure,
-                                list_page, live_report_dict, model_dict,
-                                new_code, parse_body, report_dict,
-                                store_people, success, user_dict,
+                                _dinner_counts, list_page, live_report_dict,
+                                model_dict, new_code, parse_body, report_dict,
+                                report_rule_message, store_people, success,
+                                subordinate_school_ids, user_dict,
                                 valid_person_head, verify_user_password,
                                 write_log)
 
@@ -91,13 +92,16 @@ def request_ids(request, data=None):
     return [int(v) for v in values if str(v).isdigit()]
 
 
-def report_queryset(request, current_user=None):
+def report_queryset(request, current_user=None, user_ids=None):
     qs = Report.objects.all().order_by("id")
-    if current_user:
+    if user_ids is not None:
+        # 市州端：仅查看归属于本市州的中小学账号的报名
+        qs = qs.filter(user_id__in=user_ids)
+    elif current_user:
         qs = qs.filter(user_id=current_user.id)
     keyword = request.GET.get("keyword")
     if keyword:
-        if current_user:
+        if current_user or user_ids is not None:
             qs = qs.filter(name__icontains=keyword)
         else:
             qs = qs.filter(Q(name__icontains=keyword) | Q(choir_name__icontains=keyword))
@@ -105,11 +109,17 @@ def report_queryset(request, current_user=None):
         qs = qs.filter(status=request.GET.get("status"))
     if request.GET.get("group") not in (None, ""):
         qs = qs.filter(group=request.GET.get("group"))
+    choir_name = request.GET.get("choir_name")
+    if choir_name:
+        qs = qs.filter(choir_name__icontains=choir_name)
+    school_name = request.GET.get("school_name")
+    if school_name:
+        qs = qs.filter(school_name__icontains=school_name)
     return qs
 
 
-def report_page(request, current_user=None, descending=False):
-    qs = report_queryset(request, current_user)
+def report_page(request, current_user=None, descending=False, user_ids=None):
+    qs = report_queryset(request, current_user, user_ids)
     if descending:
         qs = qs.order_by("-id")
     return response(list_page(qs, request, report_dict))
@@ -120,30 +130,41 @@ def create_report(request, province=False):
     data = body(request)
     scope = 4 if province else user.type
     people = data.get("person", [])
-    with transaction.atomic():
-        lock_user_slot(user.id)
-        try:
-            # 按组别计配额（每校每个组别一支）：小学组、中学组可各报一支。
-            # 见 assert_report_quota 与 HaveToRead.vue 的【2026-09-23 口径变更】。
-            assert_report_quota(user, scope, data.get("group"))
-        except ReportQuotaExceeded as exc:
-            transaction.set_rollback(True)
-            return response(failure(exc.message))
-        ok, stored = store_people(user, people)
-        if not ok:
-            transaction.set_rollback(True)
-            return response(failure(stored))
-        values = {f.name for f in Report._meta.fields}
-        values -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
-        payload = {k: v for k, v in data.items() if k in values}
-        for key in ("read", "minute", "second", "fileList", "person"):
-            payload.pop(key, None)
-        if not province:
-            payload["dinner_reservation"] = data.get("dinner_reservation") or []
-        else:
-            payload.pop("dinner_reservation", None)
-        report = Report.objects.create(user_id=user.id, **payload)
-        attach_report_people(report.id, stored)
+    try:
+        with transaction.atomic():
+            lock_user_slot(user.id)
+            try:
+                # 默认每校限报一支（一个组别）；can_report_twice 特许的合并办学
+                # 学校可报两支（不同组别各一支）。见 assert_report_quota。
+                assert_report_quota(user, scope, data.get("group"))
+            except ReportQuotaExceeded as exc:
+                transaction.set_rollback(True)
+                return response(failure(exc.message))
+            ok, stored = store_people(user, people)
+            if not ok:
+                transaction.set_rollback(True)
+                return response(failure(stored))
+            values = {f.name for f in Report._meta.fields}
+            values -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
+            payload = {k: v for k, v in data.items() if k in values}
+            for key in ("read", "minute", "second", "fileList", "person"):
+                payload.pop(key, None)
+            if not province:
+                payload["dinner_reservation"] = data.get("dinner_reservation") or []
+                payload["dinner_reservation_counts"] = _dinner_counts(
+                    data.get("dinner_reservation_counts"))
+            else:
+                payload.pop("dinner_reservation", None)
+                payload.pop("dinner_reservation_counts", None)
+            report = Report.objects.create(user_id=user.id, **payload)
+            attach_report_people(report.id, stored)
+    except IntegrityError as exc:
+        # 0007 指挥/指导老师规则：GaussDB 延迟触发器在事务提交时才抛错，
+        # 必须在 atomic 块外接住；无关的完整性错误原样抛出。
+        message = report_rule_message(exc)
+        if message is None:
+            raise
+        return response(failure(message))
     write_log(user, 2, "创建节目报名表 " + str(report.name))
     return response(success("创建成功", report_dict(report)))
 
@@ -157,25 +178,36 @@ def update_report(request, on_behalf=False):
     if not on_behalf and report.user_id != user.id:
         return response(failure("不具备该报表修改信息权限！"))
     people = data.get("person", [])
-    with transaction.atomic():
-        # Admin/committee edits stay attributed to the owning school so the
-        # report's ownership and its people records never change hands.
-        ok, stored = store_people(report.user_id if on_behalf else user, people)
-        if not ok:
-            transaction.set_rollback(True)
-            return response(failure(stored))
-        fields = {f.name for f in Report._meta.fields}
-        fields -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
-        for key, value in data.items():
-            if key in fields and key not in {"status", "dinner_reservation"}:
-                setattr(report, key, value)
-        if "dinner_reservation" in fields:
-            report.dinner_reservation = data.get("dinner_reservation") or []
-        if not on_behalf:
-            report.user_id = user.id
-        report.status = 0
-        report.save()
-        attach_report_people(report.id, stored)
+    try:
+        with transaction.atomic():
+            # Admin/committee edits stay attributed to the owning school so the
+            # report's ownership and its people records never change hands.
+            ok, stored = store_people(report.user_id if on_behalf else user, people)
+            if not ok:
+                transaction.set_rollback(True)
+                return response(failure(stored))
+            fields = {f.name for f in Report._meta.fields}
+            fields -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
+            for key, value in data.items():
+                if key in fields and key not in {"status", "dinner_reservation",
+                                                 "dinner_reservation_counts"}:
+                    setattr(report, key, value)
+            if "dinner_reservation" in fields:
+                report.dinner_reservation = data.get("dinner_reservation") or []
+                # 与 dinner_reservation 同款语义：漏传该键视为清空（现状口径）
+                report.dinner_reservation_counts = _dinner_counts(
+                    data.get("dinner_reservation_counts"))
+            if not on_behalf:
+                report.user_id = user.id
+            report.status = 0
+            report.save()
+            attach_report_people(report.id, stored)
+    except IntegrityError as exc:
+        # 同 create_report：0007 规则的 IntegrityError 转友好提示，其余照抛。
+        message = report_rule_message(exc)
+        if message is None:
+            raise
+        return response(failure(message))
     write_log(user, 1, "修改节目报名表 " + str(data.get("name", report.name)))
     return response(success("修改成功！", None))
 
@@ -324,7 +356,7 @@ def file_list(request):
 
 @api.get("/scan/list", auth=auth)
 def scan_list(request):
-    types = [0, 1, 4]
+    types = [0, 1, 4, User.TYPE_PRIMARY_SECONDARY]
     qs = User.objects.filter(type__in=types).order_by("id")
     if request.GET.get("keyword"):
         qs = qs.filter(nickname__icontains=request.GET["keyword"])
@@ -340,7 +372,28 @@ def scan_list(request):
 
 @api.post("/scan/cau", auth=auth)
 def scan_create_update(request):
-    data = body(request); obj, created = ScanFiles.objects.get_or_create(user_id=request.auth.id, type=data.get("type"))
+    data = body(request)
+    # type 必须是已定义渠道（0=高校渠道/学校账号，1=市级渠道）内的整数，缺失/非法回 400 而不是 500
+    scan_type = data.get("type")
+    if isinstance(scan_type, bool) or not isinstance(scan_type, int) or scan_type not in (0, 1):
+        return response(failure("type 参数不合法"), 400)
+    # files 显式传空数组=覆盖清空已存审核图（接口无删除语义，只能视为误伤），直接拒绝；
+    # 结构非法（非数组、非对象、缺 url）同样不落库，避免前端按 files[i].url 渲染时炸掉
+    if "files" in data:
+        incoming = data["files"]
+        if not isinstance(incoming, list):
+            return response(failure("files 须为文件数组"))
+        if not incoming:
+            return response(failure("请先上传文件"))
+        bad = any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("url"), str)
+            or not item["url"].strip()
+            for item in incoming
+        )
+        if bad:
+            return response(failure("files 每项须为含 url 的对象"))
+    obj, created = ScanFiles.objects.get_or_create(user_id=request.auth.id, type=scan_type)
     for key in ("files", "status", "remark"):
         if key in data: setattr(obj, key, data[key])
     obj.save()
@@ -490,20 +543,44 @@ def admin_recommend_list(request):
     return err or response(list_page(Recommend.objects.all().order_by("-created_at"), request, recommend_dict))
 
 
-def user_list(request, committee=False):
-    qs = User.objects.all().order_by("id"); keyword = request.GET.get("keyword")
-    if committee:
-        qs = qs.filter(type__in=(0, 4))
+def user_list(request):
+    # 省级（4）为无效数据，admin 与 committee 展示学校（0）、市级（1）与中小学端（5）
+    allowed_types = (0, 1, User.TYPE_PRIMARY_SECONDARY)
+    qs = User.objects.filter(type__in=allowed_types).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
+    nickname = request.GET.get("nickname")
+    if nickname: qs = qs.filter(nickname__icontains=nickname)
+    # 账号类型筛选只能在展示范围内，不能借 type 参数越权看到省级/管理员账号
+    account_type = request.GET.get("type")
+    if account_type not in (None, "") and str(account_type).lstrip("-").isdigit():
+        qs = qs.filter(type=int(account_type))
     return response(list_page(qs, request, user_dict))
+
+
+# 组委会/管理员重置密码：请求体带 password 字段即视为重置，无需填写新密码，一律重置为默认密码
+RESET_PASSWORD_DEFAULT = "scylb@2026"
+
+
+def _as_bool(value):
+    """勾选框入参归一化：兼容 true/false、1/0、"true"/"on" 等前端常见传值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return False
 
 
 def user_update_admin(request):
     data = body(request); user = User.all_objects.filter(pk=data.get("id")).first()
     if not user: return response(failure("用户不存在"))
+    # can_report_twice 是报名特许，只能由管理员/组委会授予，单独归一化，不能让学校自助提权
     for k in ("username", "nickname", "description", "tel", "leader", "type", "parent_id"):
         if k in data: setattr(user, k, data[k])
-    if data.get("password"): user.set_password(data["password"])
+    if "can_report_twice" in data:
+        user.can_report_twice = _as_bool(data["can_report_twice"])
+    if "password" in data: user.set_password(RESET_PASSWORD_DEFAULT)
     user.save(); write_log(request.auth, 1, "修改用户 " + user.username)
     return response(success())
 
@@ -511,6 +588,17 @@ def user_update_admin(request):
 def user_create_admin(request, committee=False):
     data = body(request); values = {k: data.get(k) for k in ("username", "nickname", "description", "tel", "leader", "type") if k in data}
     values["parent_id"] = 0
+    # 中小学账号（type=5）可在创建时指定所属市州（parent_id 必须指向 type=1 的市州账号）
+    requested_parent = data.get("parent_id")
+    if requested_parent not in (None, "", 0, "0"):
+        parent = User.objects.filter(pk=requested_parent).first()
+        if parent is None:
+            return response(failure("上级账号不存在"))
+        if parent.type != User.TYPE_CITY:
+            return response(failure("上级账号必须是市州账号"))
+        values["parent_id"] = parent.id
+    if "can_report_twice" in data:
+        values["can_report_twice"] = _as_bool(data["can_report_twice"])
     if committee:
         values["type"] = 0
     user = User(**values)
@@ -530,7 +618,7 @@ def user_restore_admin(request):
 
 
 def user_export_admin(request):
-    qs = User.objects.all() if request.auth.type == 2 else User.objects.filter(type=0)
+    qs = User.objects.all() if request.auth.type == 2 else User.objects.filter(type__in=(0, User.TYPE_PRIMARY_SECONDARY))
     rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "备注"]]
     rows += [[x.username, x.nickname, "初始密码为scdyz@2023，请登陆系统后修改密码，密码找回请联系省级行政部门。", x.leader, x.tel, x.description] for x in qs]
     return xlsx_response(rows, request.auth.username + ".xlsx")
@@ -541,7 +629,7 @@ def register_user_routes(prefix, expected):
     committee = expected == 2
     @api.get(prefix + "/user/list", auth=auth, operation_id=tag + "_user_list")
     def _list(request):
-        err = role_error(request, expected); return err or user_list(request, committee)
+        err = role_error(request, expected); return err or user_list(request)
     @api.put(prefix + "/user/", auth=auth, operation_id=tag + "_user_update")
     def _update(request):
         err = role_error(request, expected); return err or user_update_admin(request)
@@ -586,7 +674,8 @@ def admin_person_list(request):
     err = role_error(request, 3)
     if err: return err
     qs = Person.objects.all().order_by("id"); k = request.GET.get("keyword")
-    if k: qs = qs.filter(Q(name__icontains=k) | Q(card__icontains=k))
+    if k: qs = qs.filter(Q(name__icontains=k) | Q(card__icontains=k) | Q(school__icontains=k))
+    if request.GET.get("school"): qs = qs.filter(school__icontains=request.GET["school"])
     return response(list_page(qs, request, model_dict))
 
 
@@ -732,10 +821,15 @@ def scoped_total(request, expected, kind):
     if err: return err
     uid = request.auth.id
     if kind == "city":
+        # 市州端统计归属于本市州的中小学账号报名；中小学端仍统计本账号自身报名
+        if expected == User.TYPE_CITY:
+            report_filter = {"user_id__in": subordinate_school_ids(request.auth)}
+        else:
+            report_filter = {"user_id": uid}
         groups = [("小学组", "小学组"), ("中学组", "中学组")]
         data = []
         for group, name in groups:
-            qs = Report.objects.filter(user_id=uid, group=group)
+            qs = Report.objects.filter(group=group, **report_filter)
             data.append({"name": name, "total": qs.count(), "data1": qs.filter(status=-1).count(), "data2": qs.filter(status=0).count(), "data3": qs.filter(status=1).count()})
         return response(success("获取成功！", {"success": {"elementary": 0, "teacher": 0}, "data": data}))
     if kind == "school":
@@ -754,13 +848,38 @@ def scoped_total(request, expected, kind):
 def city_total(request): return scoped_total(request, 1, "city")
 
 
+@api.get("/primary/index/total", auth=auth)
+def primary_total(request): return scoped_total(request, User.TYPE_PRIMARY_SECONDARY, "city")
+
+
+def _index_percent_payload(request):
+    """市州端/中小学端共用的 40% 口径面板（group="0" 为历史遗留的数字组别串）。
+
+    市州端统计归属于本市州的中小学账号；中小学端统计本账号自身。
+    """
+    if request.auth.type == User.TYPE_CITY:
+        report_filter = {"user_id__in": subordinate_school_ids(request.auth)}
+    else:
+        report_filter = {"user_id": request.auth.id}
+    elementary = Report.objects.filter(group="0", **report_filter).count()
+    middle = Report.objects.filter(group="0", group_type=1, **report_filter).count() if hasattr(Report, "group_type") else 0
+    ratio = (middle / elementary) if elementary else 0
+    return {"data": [{"require": "中学组数量不低于中小学组报送总数40%", "pass": 1, "data": ["中学组数量所在比:" + str(round(ratio * 100, 2)) + "%"]}, {"require": "中小学组同一学校只能报送1个", "pass": 1, "data": []}, {"require": "中小学教师组同一个县（区）只能报送1个", "pass": 1, "data": []}]}
+
+
 @api.get("/city/index/percent", auth=auth)
 def city_percent(request):
     err = role_error(request, 1)
     if err: return err
-    uid = request.auth.id; elementary = Report.objects.filter(user_id=uid, group="0").count(); middle = Report.objects.filter(user_id=uid, group="0", group_type=1).count() if hasattr(Report, "group_type") else 0
-    ratio = (middle / elementary) if elementary else 0
-    return response(success("获取成功！", {"data": [{"require": "中学组数量不低于中小学组报送总数40%", "pass": 1, "data": ["中学组数量所在比:" + str(round(ratio * 100, 2)) + "%"]}, {"require": "中小学组同一学校只能报送1个", "pass": 1, "data": []}, {"require": "中小学教师组同一个县（区）只能报送1个", "pass": 1, "data": []}]}))
+    return response(success("获取成功！", _index_percent_payload(request)))
+
+
+@api.get("/primary/index/percent", auth=auth)
+def primary_percent(request):
+    # 中小学端完整镜像市州端统计面板
+    err = role_error(request, User.TYPE_PRIMARY_SECONDARY)
+    if err: return err
+    return response(success("获取成功！", _index_percent_payload(request)))
 
 
 @api.get("/school/index/total", auth=auth)
@@ -781,6 +900,52 @@ def province_total(request): return scoped_total(request, 4, "province")
 def province_percent(request):
     err = role_error(request, 4)
     return err or response(success("获取成功！", {"data": []}))
+
+
+def establishment_stats(qs):
+    """首页「乐团类别统计」：管乐团/铜管乐团 × 审核状态。
+
+    行结构与 /index/total 的组别统计一致（total=合计、data1=驳回、
+    data2=待审核、data3=组委会通过），前端表格组件可直接复用。
+    establishment 是单选（"管乐团"/"铜管乐团"），其余脏值不落入任何一行。
+    """
+    rows = []
+    for value in ("管乐团", "铜管乐团"):
+        eq = qs.filter(establishment=value)
+        rows.append({"name": value, "total": eq.count(),
+                     "data1": eq.filter(status=-1).count(),
+                     "data2": eq.filter(status=0).count(),
+                     "data3": eq.filter(status=1).count()})
+    return rows
+
+
+@api.get("/city/index/establishment", auth=auth)
+def city_establishment(request):
+    # 市州口径：统计归属于本市州的中小学账号报名
+    err = role_error(request, 1)
+    if err: return err
+    return response(success("获取成功！", {"data": establishment_stats(
+        Report.objects.filter(user_id__in=subordinate_school_ids(request.auth)))}))
+
+
+@api.get("/primary/index/establishment", auth=auth)
+def primary_establishment(request):
+    # 中小学端镜像市州端：只统计本账号报送的报名
+    err = role_error(request, User.TYPE_PRIMARY_SECONDARY)
+    if err: return err
+    return response(success("获取成功！", {"data": establishment_stats(Report.objects.filter(user_id=request.auth.id))}))
+
+
+@api.get("/committee/index/establishment", auth=auth)
+def committee_establishment(request):
+    err = role_error(request, 2)
+    return err or response(success("获取成功！", {"data": establishment_stats(Report.objects.all())}))
+
+
+@api.get("/admin/index/establishment", auth=auth)
+def admin_establishment(request):
+    err = role_error(request, 3)
+    return err or response(success("获取成功！", {"data": establishment_stats(Report.objects.all())}))
 
 
 def _draft_error_response(error):
@@ -907,6 +1072,13 @@ def register_draft_routes(prefix, expected, scope):
             }))
         except DraftError as exc:
             return _draft_error_response(exc)
+        except IntegrityError as exc:
+            # 0007 规则（指挥/指导老师）的 IntegrityError 转草稿接口的统一错误响应；
+            # 无关的完整性错误原样抛出。
+            message = report_rule_message(exc)
+            if message is None:
+                raise
+            return _draft_error_response(DraftIntegrityError(message))
         except (ValueError, ValidationError) as exc:
             return _draft_error_response(SubmissionError(str(exc)))
 
@@ -956,34 +1128,48 @@ def register_draft_routes(prefix, expected, scope):
             return _draft_error_response(DraftConflict("草稿已在其他页面创建，请刷新"))
 
 
-def register_scope_routes(prefix, expected, province=False):
+def register_scope_routes(prefix, expected, province=False, writable=True, subordinate=False):
+    """注册一个渠道的正式报名路由；writable=False 时只保留只读端点
+    （报名列表/详情、推荐列表），写入端点整体摘除（路由 404，而非 403）。
+    subordinate=True 时只读端点的数据范围为「归属于当前市州的中小学账号」，
+    用于市州端查看下级学校报名情况。"""
     tag = prefix.strip("/").replace("/", "_")
     @api.get(prefix + "/report/list", auth=auth, operation_id=tag + "_report_list")
     def _list(request):
-        err = role_error(request, expected); return err or report_page(request, request.auth)
-    @api.post(prefix + "/report/create", auth=auth, operation_id=tag + "_report_create")
-    def _create(request):
-        err = role_error(request, expected); return err or create_report(request, province)
-    @api.put(prefix + "/report/update", auth=auth, operation_id=tag + "_report_update")
-    def _update(request):
-        err = role_error(request, expected); return err or update_report(request)
-    @api.delete(prefix + "/report/delete/{id}", auth=auth, operation_id=tag + "_report_delete")
-    def _delete(request, id: int):
         err = role_error(request, expected)
         if err: return err
-        report = Report.objects.filter(pk=id).first()
-        if not report: return response(failure("未找到相关信息！", None))
-        if report.user_id != request.auth.id:
-            return response(failure("不具备该报表删除权限！", None))
-        report.delete(); write_log(request.auth, 3, "删除节目报名表 " + str(report.name)); return response(success("删除成功!", None))
+        if subordinate:
+            return report_page(request, user_ids=subordinate_school_ids(request.auth))
+        return report_page(request, request.auth)
+    if writable:
+        @api.post(prefix + "/report/create", auth=auth, operation_id=tag + "_report_create")
+        def _create(request):
+            err = role_error(request, expected); return err or create_report(request, province)
+        @api.put(prefix + "/report/update", auth=auth, operation_id=tag + "_report_update")
+        def _update(request):
+            err = role_error(request, expected); return err or update_report(request)
+        @api.delete(prefix + "/report/delete/{id}", auth=auth, operation_id=tag + "_report_delete")
+        def _delete(request, id: int):
+            err = role_error(request, expected)
+            if err: return err
+            report = Report.objects.filter(pk=id).first()
+            if not report: return response(failure("未找到相关信息！", None))
+            if report.user_id != request.auth.id:
+                return response(failure("不具备该报表删除权限！", None))
+            report.delete(); write_log(request.auth, 3, "删除节目报名表 " + str(report.name)); return response(success("删除成功!", None))
     @api.get(prefix + "/report/{id}", auth=auth, operation_id=tag + "_report_get")
     def _get(request, id: int):
         err = role_error(request, expected)
         report = Report.objects.filter(pk=id).first()
         if err: return err
         if not report: return response(success("获取成功！", None))
-        if report.user_id != request.auth.id:
-            return response(failure("不具备该报表查看权限！", None))
+        if subordinate:
+            allowed_ids = set(subordinate_school_ids(request.auth))
+            if report.user_id not in allowed_ids:
+                return response(failure("不具备该报表查看权限！", None))
+        else:
+            if report.user_id != request.auth.id:
+                return response(failure("不具备该报表查看权限！", None))
         result = report_dict(report)
         if province:
             name = str(report.name or "")
@@ -998,14 +1184,15 @@ def register_scope_routes(prefix, expected, province=False):
         err = role_error(request, expected)
         if err: return err
         return response(list_page(Recommend.objects.filter(user_id=request.auth.id).order_by("-created_at"), request, recommend_dict))
-    @api.post(prefix + "/recommend/cau", auth=auth, operation_id=tag + "_recommend_create_update")
-    def _recommend_cau(request):
-        err = role_error(request, expected)
-        if err: return err
-        data = body(request); obj, created = Recommend.objects.get_or_create(user_id=request.auth.id)
-        for k, v in data.items():
-            if k in {"file", "status", "remark"}: setattr(obj, k, v)
-        obj.save(); return response(success("操作成功！", None))
+    if writable:
+        @api.post(prefix + "/recommend/cau", auth=auth, operation_id=tag + "_recommend_create_update")
+        def _recommend_cau(request):
+            err = role_error(request, expected)
+            if err: return err
+            data = body(request); obj, created = Recommend.objects.get_or_create(user_id=request.auth.id)
+            for k, v in data.items():
+                if k in {"file", "status", "remark"}: setattr(obj, k, v)
+            obj.save(); return response(success("操作成功！", None))
 
 
 def _map_pair(prefix, value):
@@ -1018,11 +1205,15 @@ def _map_pair(prefix, value):
     return result
 
 
-register_draft_routes("/city", 1, ReportDraft.SCOPE_CITY)
+# 市州端（type=1）2026-09-24 起只读：草稿流与写入端点整体摘除，历史数据仍可查看。
+# 报名查看范围为「归属于本市州的中小学账号」（parent_id 指向本市州）。
+register_scope_routes("/city", 1, writable=False, subordinate=True)
 register_draft_routes("/school", 0, ReportDraft.SCOPE_SCHOOL)
-register_scope_routes("/city", 1)
 register_scope_routes("/school", 0)
 register_scope_routes("/province", 4, True)
+# 中小学端（type=5）：原市州端报名功能整体移植至此（草稿流 + 正式报名 + 推荐写入）。
+register_draft_routes("/primary", User.TYPE_PRIMARY_SECONDARY, ReportDraft.SCOPE_PRIMARY_SECONDARY)
+register_scope_routes("/primary", User.TYPE_PRIMARY_SECONDARY)
 
 
 @api.get("/ticket/list")

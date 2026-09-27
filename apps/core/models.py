@@ -112,6 +112,8 @@ class User(AbstractBaseUser):
     TYPE_COMMITTEE = 2
     TYPE_ADMIN = 3
     TYPE_PROVINCE = 4
+    # 中小学端：接管原市州端的报名功能（2026-09-24 起），市州端降级为只读。
+    TYPE_PRIMARY_SECONDARY = 5
     id = models.BigAutoField(primary_key=True)
     username = models.CharField(max_length=30, unique=True, default=" ")
     nickname = models.CharField(max_length=255, default=" ")
@@ -119,6 +121,10 @@ class User(AbstractBaseUser):
     tel = models.CharField(max_length=50, default="", blank=True, null=True)
     leader = models.CharField(max_length=50, default="", blank=True, null=True)
     type = models.IntegerField(default=0)
+    # 报名特许：默认 False = 每所学校限报一支队伍、只能参加一个组别（红头文件原口径，
+    # 高校端 type=0 与中小学端 type=5 同此默认）。True 用于中小学合并办学的学校，
+    # 允许报两支（小学组、中学组各一支；每个组别仍限一支），由管理员/组委会授予。
+    can_report_twice = models.BooleanField(default=False)
     # parent_id is used by Laravel controllers although it was absent from the
     # checked-in users migration; keeping it nullable is backwards compatible.
     parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.DO_NOTHING,
@@ -220,6 +226,11 @@ class Report(models.Model):
     spectrum = models.IntegerField(null=True, blank=True)
     file = models.IntegerField(null=True, blank=True)
     dinner_reservation = LegacyJSONField(default=list, blank=True, null=True)
+    # 各时段就餐人数（第十二届新增）：与 dinner_reservation 并行、按下标对齐
+    # registration_form.MEALS 的 6 个官方时段；元素 null/非负整数，counts[i]>0
+    # 表示第 i 时段订 N 人。通知附件2：在对应位置写上就餐人数。渲染层在
+    # _meal_cells 与字符串勾选合并（人数优先）；不参与配额/校验。
+    dinner_reservation_counts = LegacyJSONField(default=list, blank=True, null=True)
     status = models.IntegerField(default=0, null=True, blank=True)
     remark = models.CharField(max_length=255, null=True, blank=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
@@ -243,7 +254,10 @@ class ReportDraft(models.Model):
     STATE_SUBMITTED = 1
 
     SCOPE_SCHOOL = User.TYPE_SCHOOL
+    # 市州端已降级为只读（2026-09-24），不再产生新草稿；常量保留供存量
+    # scope=1 的历史草稿行识别与数据兼容。
     SCOPE_CITY = User.TYPE_CITY
+    SCOPE_PRIMARY_SECONDARY = User.TYPE_PRIMARY_SECONDARY
 
     id = models.BigAutoField(primary_key=True)
     user_id = models.BigIntegerField()
@@ -294,6 +308,12 @@ class Person(models.Model):
     #
     # 没有 default：NOT NULL 且无默认值，逼调用方显式给值，杜绝 " " 这类占位符
     # 重新长出来（旧 default=" " 是 GaussDB 空串当 NULL 的遗留变通，与 6 位不变量互斥）。
+    #
+    # 【合并说明】master 侧此处曾是 `max_length=255, default=" "`，并配
+    # services._normalize_card 做「18 位写入时自动截断」。合并时**不采纳**：
+    # 自动截断把 18 位号码悄悄换成另一个人的后 6 位（前 6 位是地区码，同区人全一样），
+    # 是本轮改造要根除的错配来源。写入路径只认 normalize_card()，非法即整批拒绝；
+    # 18 位历史数据的清洗由迁移 0013 + normalize_person_cards 命令单独负责。
     card = models.CharField(max_length=CARD_MAX_LENGTH, validators=[CARD_VALIDATOR])
     age = models.IntegerField(null=True, blank=True)
     school = models.CharField(max_length=255, null=True, blank=True)
@@ -317,6 +337,8 @@ class ReportPerson(models.Model):
     person_id = models.IntegerField(null=True, blank=True, db_index=True)
     position = models.IntegerField()
     type = models.IntegerField()
+    signature_order = models.IntegerField(null=True, blank=True)
+    display_order = models.IntegerField(null=True, blank=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

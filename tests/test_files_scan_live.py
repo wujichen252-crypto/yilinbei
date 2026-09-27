@@ -43,10 +43,10 @@ class FileAndScanApiTests(ApiTestCase):
         first = self.json_request(
             "post",
             "/api/scan/cau",
-            {"user_id": self.other.id, "type": 1, "files": [{"id": 10}]},
+            {"user_id": self.other.id, "type": 1, "files": [{"id": 10, "url": "https://files.example/10.pdf"}]},
         )
         second = self.json_request(
-            "post", "/api/scan/cau", {"type": 1, "files": [{"id": 11}]}
+            "post", "/api/scan/cau", {"type": 1, "files": [{"id": 11, "url": "https://files.example/11.pdf"}]}
         )
 
         self.assertEqual(first.json()["msg"], "新建成功!")
@@ -54,7 +54,7 @@ class FileAndScanApiTests(ApiTestCase):
         self.assertEqual(ScanFiles.objects.count(), 1)
         scan = ScanFiles.objects.get()
         self.assertEqual(scan.user_id, self.school.id)
-        self.assertEqual(scan.files, [{"id": 11}])
+        self.assertEqual(scan.files, [{"id": 11, "url": "https://files.example/11.pdf"}])
 
     def test_scan_file_lookup_prevents_horizontal_access_for_regular_user(self):
         own = ScanFiles.objects.create(
@@ -75,6 +75,74 @@ class FileAndScanApiTests(ApiTestCase):
 
         self.assertEqual(regular.json()["data"]["id"], own.id)
         self.assertEqual(privileged.json()["data"]["id"], other.id)
+
+
+class ScanCreateUpdateValidationTests(ApiTestCase):
+    """对应《提交.md》S-1~S-5：空/非法 files 不得清空或建行，非法 type 回 400。"""
+
+    def setUp(self):
+        self.school = self.create_user("school", 0)
+        self.authorize_as(self.school)
+
+    def test_empty_files_rejected_and_preserves_existing(self):
+        ScanFiles.objects.create(
+            user_id=self.school.id,
+            type=0,
+            files=[{"uid": "u1", "name": "盖章扫描件.pdf", "url": "https://files.example/a.pdf"}],
+        )
+        result = self.json_request("post", "/api/scan/cau", {"type": 0, "files": []})
+
+        payload = result.json()
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(payload["code"], 1)
+        self.assertEqual(payload["msg"], "请先上传文件")
+        scan = ScanFiles.objects.get(user_id=self.school.id, type=0)
+        self.assertEqual(scan.files[0]["url"], "https://files.example/a.pdf")
+
+    def test_empty_files_creates_no_row(self):
+        result = self.json_request("post", "/api/scan/cau", {"type": 0, "files": []})
+
+        self.assertEqual(result.json()["code"], 1)
+        self.assertEqual(ScanFiles.objects.count(), 0)
+
+    def test_files_bad_shape_rejected(self):
+        for bad in (None, "这不是数组", 3, [1, 2], [{"id": 1}], [{"url": ""}], [{"url": 5}]):
+            with self.subTest(files=bad):
+                result = self.json_request("post", "/api/scan/cau", {"type": 0, "files": bad})
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(result.json()["code"], 1)
+                self.assertEqual(ScanFiles.objects.count(), 0)
+
+    def test_type_missing_or_invalid_returns_400(self):
+        for bad in (None, "abc", 1.5, 9, True, [0]):
+            with self.subTest(type=bad):
+                result = self.json_request(
+                    "post",
+                    "/api/scan/cau",
+                    {"type": bad, "files": [{"url": "https://files.example/a.pdf"}]},
+                )
+                self.assertEqual(result.status_code, 400)
+                self.assertEqual(result.json()["code"], 1)
+        result = self.json_request(
+            "post", "/api/scan/cau", {"files": [{"url": "https://files.example/a.pdf"}]}
+        )
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(ScanFiles.objects.count(), 0)
+
+    def test_request_without_files_key_still_updates_other_fields(self):
+        ScanFiles.objects.create(
+            user_id=self.school.id,
+            type=0,
+            files=[{"uid": "u1", "url": "https://files.example/a.pdf"}],
+        )
+        result = self.json_request("post", "/api/scan/cau", {"type": 0, "remark": "备注"})
+
+        payload = result.json()
+        self.assertEqual(payload["code"], 0)
+        self.assertEqual(payload["msg"], "修改成功!")
+        scan = ScanFiles.objects.get(user_id=self.school.id, type=0)
+        self.assertEqual(scan.files, [{"uid": "u1", "url": "https://files.example/a.pdf"}])
+        self.assertEqual(scan.remark, "备注")
 
 
 class LiveReportOwnershipTests(ApiTestCase):

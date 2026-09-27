@@ -5,8 +5,10 @@
 （如 Linux 生产环境）时整体回退 STSong-Light。
 
 数据映射沿用 /api/export/report 原有口径：ReportPerson.position 0=正式队员、
-1=预备队员、2=指挥、4=指导老师；乐器名经 _instrument_bucket 归一到官方表格
-的 17 个栏目（含长号）。reportlab 缺失时降级为 CSV 文本（与 views.pdf_response 一致）。
+1=预备队员、2=指挥、4=指导老师（指挥是教师 type=1 时，第一指导老师槽自动填
+指挥本人，见 export_services.adviser_instructors）；乐器名经 _instrument_bucket
+归一到官方表格的 17 个栏目（含长号）。reportlab 缺失时降级为 CSV 文本
+（与 views.pdf_response 一致）。
 """
 import io
 import os
@@ -154,10 +156,12 @@ def _styles():
 
 
 def _meal_cells(report):
-    """把 dinner_reservation（JSON 列表）填进 6 个用餐格。
+    """把 dinner_reservation（JSON 列表）+ dinner_reservation_counts（各时段人数）填进 6 个用餐格。
 
-    兼容三种写法：下标 0-5、完整文案（"11月20日午餐"）、简写（"20午"）。
-    无法归位的条目返回给调用方放进备注。
+    字符串兼容三种写法：下标 0-5、完整文案（"11月20日午餐"）、简写（"20午"）。
+    人数（counts[i] > 0，来自与 dinner_reservation 并行对齐的人数数组）优先于
+    勾选：对应格子直接印人数（通知附件2：在对应位置写上就餐人数）。
+    无法归位的字符串条目返回给调用方放进备注。
     """
     from apps.api.export_services import _json_list
     cells = [""] * len(MEALS)
@@ -176,31 +180,58 @@ def _meal_cells(report):
                     break
         if not matched:
             leftovers.append(text)
+    counts = _json_list(getattr(report, "dinner_reservation_counts", None))
+    for index, item in enumerate(counts[:len(MEALS)]):
+        # 0/空/垃圾 = 该时段不订或没填，不覆盖字符串勾选；正数才落格
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            continue
+        cells[index] = str(item)
     return cells, leftovers
 
 
 def _checkline(options, value):
     """乐团类别 / 参展组别：命中项打 ■，其余保持 □（GB2312 字体内可用）。"""
-    value = str(value or "")
+    value = str(value or "").strip()
+    # 必须整项相等："管乐团"是"铜管乐团"的子串，用 in 会把两者同时勾上
     return "　　".join(
-        f"{option}■" if option in value else f"{option}□"
+        f"{option}■" if option == value else f"{option}□"
         for option in options
     )
 
 
 def form_context(report):
     """把一张报名表整理成官方表格各栏的纯文本值（便于测试与渲染解耦）。"""
-    from apps.api.export_services import _instrument_bucket, _person_name
+    from apps.api.export_services import (_instrument_bucket, _person_name,
+                                          adviser_instructors, instructor_sort_key)
     from apps.core.models import Person, ReportPerson, User
 
     links = list(ReportPerson.objects.filter(report_id=report.id))
     people = {p.id: p for p in Person.objects.filter(id__in=[x.person_id for x in links if x.person_id])}
 
     def members(position):
-        return [people[x.person_id] for x in links if x.position == position and x.person_id in people]
+        rows = [x for x in links if x.position == position and x.person_id in people]
+        if position == 4:
+            # 指导老师按署名排序（与后台导出共用 instructor_sort_key）；
+            # 教师指挥固定第一由下方 adviser_instructors 叠加
+            rows.sort(key=instructor_sort_key)
+        return [people[x.person_id] for x in rows]
 
     formal, reserve = members(0), members(1)
     conductors, teachers = members(2), members(4)
+
+    # 附件2 口径：指挥是教师（关系行 type=1）时，第一指导老师槽即指挥本人，
+    # 学校另报的指导老师顺延到第 2 槽（与后台报名数据导出同口径）
+    link_types = {x.person_id: x.type for x in links}
+    # 本轮新增：指挥关系行自己的署名排序（links 里 position=2 且 person_id 匹配的那条）
+    conductor_order = next(
+        (x.signature_order for x in links
+         if x.position == 2 and conductors and x.person_id == conductors[0].id),
+        None,
+    )
+    teachers = adviser_instructors(
+        conductors, teachers,
+        link_types.get(conductors[0].id) if len(conductors) == 1 else None,
+        conductor_order)
 
     user = User.objects.filter(pk=report.user_id).first()
     school = report.school_name or getattr(user, "nickname", "") or ""
@@ -260,7 +291,8 @@ def _report_story(report, styles, is_last):
         Spacer(1, 10),
     ]
 
-    # 指导老师：官方表格固定两个名额槽，各带一列联系电话；超出 2 人的并入第 2 槽
+    # 指导老师：官方表格固定两个名额槽，各带一列联系电话；超出 2 人的并入第 2 槽。
+    # 指挥为教师时第 1 槽已在 form_context 并入指挥本人（附件2 口径）
     lines, phones = ctx["teacher_lines"], ctx["teacher_phones"]
     teacher_slots = [(lines[i] if i < len(lines) else f"{i + 1}.",
                       phones[i] if i < len(phones) else "") for i in range(2)]

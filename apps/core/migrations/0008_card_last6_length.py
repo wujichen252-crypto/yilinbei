@@ -2,6 +2,12 @@
 #
 # 【本迁移有前置条件，执行顺序不许颠倒】
 #     0007（放松约束） → `manage.py normalize_person_cards`（数据转换） → 0008（本迁移）
+# 合并 master 之后，这三步之间会夹进 master 的 0007_db_comments…0015 整条链
+# （其中 0013_card_tail_identity 也会截断 person.card），本文件因此排在最后执行 —— 见下方
+# dependencies 处的合并说明。运维侧的动作序列不变：
+#     migrate core 0007_card_relax_unique_and_notnull
+#   → normalize_person_cards（先 dry-run，确认后再 --apply）
+#   → migrate（master 链 + 本文件收尾）
 #
 # 原因：`ALTER COLUMN TYPE varchar(6)` 在表里还有 18 位/7 位/带空格的值时**必然失败**
 # （value too long）。0007 只是把「唯一」和「非空」这两条约束摘掉，列宽仍是 255，
@@ -34,8 +40,40 @@ def _card_field(**kwargs):
 
 class Migration(migrations.Migration):
 
+    # 【合并说明 · 为什么这里多了一条 master 侧的依赖】
+    # 本文件是 zyr 分支「身份证后 6 位」的第 2 步（收尾），master 侧另有一条
+    # 从 0006 一路推到 0015 的迁移链，其中
+    #   0013_card_tail_identity 会把 person.card 从 varchar(6) 口径**改回**
+    #   `CharField(default=" ", max_length=255)` 并顺手截断历史 18 位数据。
+    # 合并前两条链各有一个叶子节点（本文件 + 0015_report_dinner_reservation_counts），
+    # Django 会直接报 "Conflicting migrations detected; multiple leaf nodes"，
+    # 而且**谁最后跑不确定**：若 0013 在本文件之后执行，最终 schema 会退化成
+    # varchar(255) + default=" "，与 models.Person.card（6 位、无默认值）不一致，
+    # `makemigrations --check` 立刻失败。
+    #
+    # 这里把 0015 加进依赖（而不是新建一个空 merge migration 去汇合）是**故意的**：
+    #   · `MigrationGraph.forwards_plan()` 对一个节点的多个依赖是当成 **set** 做 DFS 的，
+    #     仅靠 "0016 = merge(0008, 0015)" 无法保证 0008 在 0013 之后执行 —— 同一张图
+    #     在不同进程里可能排出不同的顺序（字符串 set 的迭代序受 hash seed 影响）。
+    #     真依赖边则是硬约束：0008 必定在 0015 之后、也就是必定在 0013 之后执行。
+    #   · 于是整条链收敛成单叶子且顺序确定：
+    #       0006 → 0007_card_relax（松约束）→ 0007_db_comments → 0008_alter_person_card
+    #       → 0009 → 0010 → 0011 → 0012 → 0013_card_tail_identity（历史归一化）
+    #       → 0013_merge → 0014 → 0015 → 0008_card_last6_length（**最后**收紧到 6 位）
+    #     注意 0007_card_relax 与 master 链之间没有依赖边，两者先后由 Django 决定；
+    #     两种顺序都安全：0008_alter_person_card 本身就会摘掉 person.card 的 UNIQUE，
+    #     所以 0013 截断时不存在唯一约束冲突；而五张表的 card 最终定义全部由本文件
+    #     重写，谁先谁后都不影响收尾状态。
+    #
+    # 【升级存量库时的注意点（仅当有库已经把 zyr 单分支的 0008 跑过）】
+    # 那种库里 0008 已应用、0015 未应用，Django 的 InconsistentMigrationHistory 会拦住
+    # migrate。正确做法是先退回到 0007 再整体前滚（varchar(6)→varchar(255) 是放宽，不丢数据）：
+    #     python manage.py migrate core 0007_card_relax_unique_and_notnull
+    #     python manage.py migrate
+    # 部署在 master 侧的库不受影响：master 的迁移依赖没动，0008 本身未应用 —— 无矛盾。
     dependencies = [
         ("core", "0007_card_relax_unique_and_notnull"),
+        ("core", "0015_report_dinner_reservation_counts"),
     ]
 
     operations = [

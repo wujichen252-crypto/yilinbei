@@ -14,9 +14,11 @@ def decode_disposition(raw):
                    for value, charset in parts)
 
 
-def link(report, person, position):
-    return ReportPerson.objects.create(report_id=report.id, person_id=person.id,
-                                       position=position, type=position)
+def link(report, person, position, type=None, signature_order=None):
+    # type 未指定时沿用旧夹具惯例（type=position，即未知身份，规则放行）
+    return ReportPerson.objects.create(
+        report_id=report.id, person_id=person.id, position=position,
+        type=position if type is None else type, signature_order=signature_order)
 
 
 class RegistrationFormContextTests(ApiTestCase):
@@ -29,11 +31,11 @@ class RegistrationFormContextTests(ApiTestCase):
             name1="指定曲目A", name="自选曲目B", remark="请安排停车",
         )
 
-    def add_person(self, name, position, instrument="", phone=""):
+    def add_person(self, name, position, instrument="", phone="", type=None, signature_order=None):
         person = Person.objects.create(name=name, user_id=self.school.id,
                                        card=card_for(name), instrument=instrument,
                                        phone=phone)
-        link(self.report, person, position)
+        link(self.report, person, position, type=type, signature_order=signature_order)
         return person
 
     def test_checkboxes_school_fallback_and_headcount(self):
@@ -50,6 +52,13 @@ class RegistrationFormContextTests(ApiTestCase):
         self.assertEqual(ctx["headcount"], "正式队员 1 人，预备队员 1 人")
         self.assertEqual(ctx["reserve_names"], "李四")
         self.assertIn("请安排停车", ctx["remark"])
+
+    def test_type_checkbox_brass_only_checks_brass(self):
+        # 回归："管乐团"是"铜管乐团"的子串，勾选铜管时不得连带勾上管乐团
+        brass = self.make_report(self.school, school_name="某某中学",
+                                 establishment="铜管乐团", group="小学组")
+        ctx = form_context(brass)
+        self.assertEqual(ctx["type_line"], "管乐团□　　铜管乐团■")
 
     def test_instrument_buckets_match_official_columns(self):
         # 官方表格 17 栏：上低音萨克斯与长号均单列；表外乐器（如次中音号）并入"其他"
@@ -75,12 +84,116 @@ class RegistrationFormContextTests(ApiTestCase):
         self.assertEqual(ctx["teacher_lines"], ["1. 刘老师", "2. 陈老师"])
         self.assertEqual(ctx["teacher_phones"], ["13900000002", "13900000003"])
 
+    def test_teacher_conductor_takes_first_instructor_slot(self):
+        # 附件2 口径：指挥是教师（type=1）时，第一指导老师槽自动填指挥本人
+        #（姓名+联系电话），学校另报的指导老师顺延到第 2 槽
+        self.add_person("王指挥", 2, phone="13900000001", type=1)
+        self.add_person("刘老师", 4, phone="13900000002")
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 王指挥", "2. 刘老师"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000001", "13900000002"])
+
+    def test_teacher_conductor_without_instructor_fills_only_first_slot(self):
+        self.add_person("王指挥", 2, phone="13900000001", type=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 王指挥"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000001"])
+
+    def test_teacher_conductor_duplicated_as_instructor_renders_once(self):
+        # 同一位教师指挥被重复提交为指导老师（同 person_id）时只渲染一次
+        conductor = self.add_person("王指挥", 2, phone="13900000001", type=1)
+        link(self.report, conductor, 4, type=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 王指挥"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000001"])
+
+    def test_student_conductor_does_not_fill_instructor_slot(self):
+        # 指挥是学生或身份未知时不自动填充，指导老师槽只列学校另报的人
+        self.add_person("学生指挥", 2, phone="13900000001", type=0)
+        self.add_person("刘老师", 4, phone="13900000002")
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 刘老师"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000002"])
+
+    def test_instructor_rows_order_by_signature_order(self):
+        # 署名序号小的在前，与提交顺序无关
+        self.add_person("刘老师", 4, phone="13900000002", signature_order=2)
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 陈老师", "2. 刘老师"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000003", "13900000002"])
+
+    def test_instructor_without_signature_order_falls_after_numbered(self):
+        # 未填序号的排在全部已填之后、按提交顺序（关系行 id）
+        self.add_person("刘老师", 4, phone="13900000002")                      # 无号，先提交
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)   # 有号
+        self.add_person("王老师", 4, phone="13900000004")                      # 无号，后提交
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 陈老师", "2. 刘老师", "3. 王老师"])
+
+    def test_instructor_tie_breaks_by_submission_order(self):
+        # 同号并列时按提交顺序（关系行 id）稳定排序
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)
+        self.add_person("刘老师", 4, phone="13900000002", signature_order=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 陈老师", "2. 刘老师"])
+
+    def test_teacher_conductor_fixed_first_then_signature_order(self):
+        # 教师指挥固定占第一署名位，其余指导老师按署名序号顺延
+        self.add_person("王指挥", 2, phone="13900000001", type=1)
+        self.add_person("刘老师", 4, phone="13900000002", signature_order=2)
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 王指挥", "2. 陈老师", "3. 刘老师"])
+
+    def test_teacher_conductor_with_signature_order_2_lands_second(self):
+        # 指挥自己填了署名序号 2：按号落位到第 2 行，不再无条件占第一行（与后台导出同口径）
+        self.add_person("王指挥", 2, phone="13900000001", type=1, signature_order=2)
+        self.add_person("刘老师", 4, phone="13900000002", signature_order=2)
+        self.add_person("陈老师", 4, phone="13900000003", signature_order=1)
+        ctx = form_context(self.report)
+
+        self.assertEqual(ctx["teacher_lines"], ["1. 陈老师", "2. 王指挥", "3. 刘老师"])
+        self.assertEqual(ctx["teacher_phones"], ["13900000003", "13900000001", "13900000002"])
+
     def test_meal_slots_accept_index_label_and_abbreviation(self):
         self.report.dinner_reservation = [0, "11月21日晚餐", "22午"]
         self.report.save(update_fields=["dinner_reservation"])
         cells = form_context(self.report)["meal_cells"]
 
         self.assertEqual(cells, ["√", "", "", "√", "√", ""])
+
+    def test_meal_counts_render_numbers_and_win_over_ticks(self):
+        # 人数 >0 的格子直接印人数（附件2：在对应位置写上就餐人数），优先于字符串勾选；
+        # 0/空不算订、也不覆盖勾选
+        self.report.dinner_reservation = [0, "21晚"]
+        self.report.dinner_reservation_counts = [12, 0, None, 8]
+        self.report.save(update_fields=["dinner_reservation", "dinner_reservation_counts"])
+        cells = form_context(self.report)["meal_cells"]
+
+        self.assertEqual(cells, ["12", "", "", "8", "", ""])
+
+    def test_meal_counts_zero_falls_back_to_tick(self):
+        # counts=0 表示该时段没填人数，回到字符串勾选的 √
+        self.report.dinner_reservation = ["0"]
+        self.report.dinner_reservation_counts = [0]
+        self.report.save(update_fields=["dinner_reservation", "dinner_reservation_counts"])
+        self.assertEqual(form_context(self.report)["meal_cells"][0], "√")
+
+    def test_meal_counts_alone_reserve_slots(self):
+        # 只传人数不传字符串：counts[i]>0 即视为订了该时段
+        self.report.dinner_reservation = []
+        self.report.dinner_reservation_counts = [None, None, None, None, None, 5]
+        self.report.save(update_fields=["dinner_reservation", "dinner_reservation_counts"])
+        self.assertEqual(form_context(self.report)["meal_cells"], ["", "", "", "", "", "5"])
 
     def test_unmatched_meal_entry_moves_to_remark(self):
         self.report.dinner_reservation = ["10月1日午宴"]

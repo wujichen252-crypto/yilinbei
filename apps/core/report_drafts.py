@@ -10,37 +10,49 @@ from django.utils import timezone
 from .models import Files, Person, Report, ReportDraft, ReportPerson, User, normalize_card
 from .services import attach_report_people, store_people
 
-# 每所学校/单位可持有的（未删除）正式报名数上限；按 scope 分档：
-#   0 = 校级、1 = 市级、4 = 省级（历史 create_report 里的 "8" 沿用）。
-# 规则口径：驳回态（status=-1）与待审核态（status=0）同样占额度，
-# 只有软删除后才腾出名额，与 Report.objects（SoftDeleteManager）一致。
-REPORT_QUOTA_BY_SCOPE = {0: 1, 1: 1, 4: 8}
+# 正式报名数上限（未软删；驳回态 status=-1 与待审核态 status=0 同样占额度，
+# 只有软删除后才腾出名额，与 Report.objects 的 SoftDeleteManager 一致）。
+#
+# 【2026-09-27 口径】高校端（scope 0）与中小学端（scope 5）统一回到红头文件原口径
+# 「每所学校限报一支队伍，且只能参加一个组别」；上限不再取本表，而由账号级特许
+# users.can_report_twice 决定（False=1 支，True=2 支，授予中小学合并办学的学校），
+# 见 ACCOUNT_QUOTA_SCOPES 与 assert_report_quota。
+#
+# 本表只留省级端（scope 4）——上一届西部音乐周的历史渠道，维持固定上限 8 的旧口径，
+# 特许字段不参与。scope 1（市州端）已无写入路径（只读），不配额度。
+REPORT_QUOTA_BY_SCOPE = {4: 8}
 DEFAULT_REPORT_QUOTA = 1
+
+# 走「账号总量 + 组别唯一」口径的渠道：默认每校 1 支；can_report_twice=True 时 2 支，
+# 且每个组别仍限 1 支（assert_report_group_unique）。
+ACCOUNT_QUOTA_SCOPES = (User.TYPE_SCHOOL, User.TYPE_PRIMARY_SECONDARY)
 
 # 各 scope 允许报送的组别。**未列出的 scope 一律不做组别归属校验**（保持现状）。
 #
 # 口径依据（组委会 2026-09-23 答复，前端 HaveToRead.vue §二段 2 同步记载）：
-#   · 市级渠道（scope 1）只能报小学组、中学组，**不得出现大学组** ——
+#   · 中小学端（scope 5，原市级渠道）只能报小学组、中学组，**不得出现大学组** ——
 #     大学组归高校渠道。管乐团与铜管乐团同规则（不再按乐团类型细分）。
-#   · 「最多两支」由配额自动满足，不靠本表：本表限死 2 个组别，配额又是每组别 1 支，
-#     两者相乘即上限 2，且必然是一支小学、一支中学 —— 所以不可能出现「2 支小学组」。
+#   · 【2026-09-27 修订】默认每校只能报 1 个组别；中小学合并办学的学校经管理员
+#     授予 can_report_twice 后可报 2 支 —— 本表限死 2 个组别、账号上限为 2、
+#     每组别又限 1 支，三者相乘保证两支必然是一支小学、一支中学，不可能出现「2 支小学组」。
 #   · 两支的乐团类型互相独立（小学管乐团 + 中学铜管乐团是允许的）。后端
 #     establishment 与 group 之间**零耦合**，本来就是自由的，无需改动。
 #
-# 为什么只有 scope 1：
+# 为什么只有 scope 5：
+#   · scope 1（原市级渠道）降级只读后不再有写入路径，不入表；
 #   · scope 0（高校端）组委会明确要求本次**不加**校验，故不入表；
 #   · scope 4（省级）是上一届西部音乐周 dist 包留下的，本届红头文件没有省级端，
 #     故不入表（不入表 = 不校验，保持现状，不为历史代码写新规则）。
-REPORT_ALLOWED_GROUPS = {1: ("小学组", "中学组")}
+REPORT_ALLOWED_GROUPS = {5: ("小学组", "中学组")}
 
 # 仅用于拼错误文案；查不到时退到「当前渠道」
-REPORT_SCOPE_LABELS = {0: "高校端", 1: "市级渠道", 4: "省级端"}
+REPORT_SCOPE_LABELS = {0: "高校端", 4: "省级端", 5: "中小学端"}
 
 REPORT_FIELDS = {
     "choir_name", "name", "name1", "school_name", "desc", "group",
     "establishment", "establishment_name", "contact_name", "contact_phone",
     "contact_way", "time_length", "spectrum", "file", "dinner_reservation",
-    "remark", "person",
+    "dinner_reservation_counts", "remark", "person",
 }
 SERVER_FIELDS = {"user_id", "scope", "status", "report_id", "draft_id", "version",
                  "created_at", "updated_at", "submitted_at"}
@@ -50,8 +62,16 @@ SERVER_FIELDS = {"user_id", "scope", "status", "report_id", "draft_id", "version
 # 两个都收（收进来后统一存在 `id` 上），否则就是半迁移状态：老前端发 `id`、
 # 新前端发 `person_id`，只能有一边能用。注意这一条是**精确白名单**，
 # 白名单里没有的键会让整个暂存/提交 400（见 draftPayload.js 里记载的那次事故）。
+#
+# 【合并说明：这里必须是两边的并集】
+#   · person_id —— 来自身份证后 6 位改造（复用 Person 的显式引用，身份基准）；
+#   · signature_order / display_order —— 来自 master（署名顺序、指导教师表内行下标）。
+#   少任何一个都会造成「前端发得出、后端 400 判为不允许字段」，且报错文案
+#   （person[N] 存在不允许字段）用户看不懂。因此白名单是 superset：
+#   前端少发键是安全的（_person() 会补 None），多发未列出的键才会 400。
 PERSON_FIELDS = {"id", "person_id", "name", "card", "age", "school", "phone", "gender",
-                 "major", "head", "instrument", "other", "remark", "position", "type"}
+                 "major", "head", "instrument", "other", "remark", "position", "type",
+                 "signature_order", "display_order"}
 
 # 单字段上限，与 Report 各列 max_length 对齐；未列出的字段沿用 255（大部分列宽）
 _FIELD_LIMITS = {"desc": 1000}
@@ -125,6 +145,22 @@ def assert_group_allowed(scope, group):
     raise InvalidSubmission("%s只能报送%s，不能报送%s" % (label, "或".join(allowed), group))
 
 
+def assert_report_group_unique(user, group, exclude_report_id=None):
+    """同一学校同一组别只能持有一支（未软删）报名；驳回态同样占组别名额。
+
+    被驳回报名重新提交时可能改了组别（update_rejected_report_from_submission），
+    此时传 exclude_report_id 排除自身，只防与「另一支」撞组别。
+    """
+    if not group:
+        return
+    queryset = Report.objects.filter(user_id=user.id, group=group)
+    if exclude_report_id is not None:
+        queryset = queryset.exclude(id=exclude_report_id)
+    if queryset.exists():
+        # 点明是哪个组别满了 —— 只说「限报一支」正是用户被误导的原因
+        raise ReportQuotaExceeded("%s每所学校限报一支队伍，您已有报名记录" % group)
+
+
 def assert_report_quota(user, scope, group=None):
     """必须在 lock_user_slot 之后、同一事务内调用。
 
@@ -133,31 +169,40 @@ def assert_report_quota(user, scope, group=None):
     create_report_from_submission —— 都是新建报名的必经之路，加在这里两个入口自动覆盖，
     将来多一个调用点也不会漏。请注意函数名只说了 quota，组别校验是搭车的。
 
-    【配额的单位是「组别」，不是「账号」】
-    口径依据（不是推测，是仓库里已有的书面口径）：
-    `src/components/common/HaveToRead.vue` §二段 2 的【2026-09-23 口径变更】写得很明确 ——
-    红头文件原文是「每所学校限报一支队伍，且只能参加一个组别」，组委会后来**放宽**为
-    「每所学校**每个组别**限报一支队伍，小学组、中学组可各报一支（最多两支），
-      大学组限报一支」。同一段还要求本函数与该节**必须同步**。
+    【2026-09-27 口径：先卡账号总量，再卡组别唯一】
+    红头文件原文「每所学校限报一支队伍，且只能参加一个组别」同时适用于高校端（scope 0）
+    与中小学端（scope 5）。因此这两个渠道先做**账号总量**检查：
+      · can_report_twice=False（默认）：总量 1，报过任意组别的一支后不能再报；
+      · can_report_twice=True（管理员授予中小学合并办学的学校）：总量 2，且每个组别
+        仍限 1 支 —— 配合 scope 5 的组别白名单（小学组/中学组），两支必然各占一个组别。
+    历史上 2026-09-23~27 曾短暂放开为「每组别 1 支、组别数不限」，已收回；
+    `src/components/common/HaveToRead.vue` §二段 2 与本注释必须同步。
 
-    原先这里只按 user_id 计数、完全不看 group，于是同一所学校报完中学组就再也报不了
-    小学组 —— 页面承诺「可各报一支」，系统却回
-    `REPORT_QUOTA_EXCEEDED 每所学校限报一支队伍，您已有报名记录`，两边对不上。
-
-    group 取不到时退回账号级计数（宁严不松，不会凭空多放行一支）。
+    省级端（scope 4）及其他历史渠道维持「固定上限 + 按组别计数」的旧逻辑，
+    can_report_twice 不参与（特许只发给学校账号）。
     """
     assert_group_allowed(scope, group)
-    limit = REPORT_QUOTA_BY_SCOPE.get(scope, DEFAULT_REPORT_QUOTA)
     queryset = Report.objects.filter(user_id=user.id)
+
+    if scope in ACCOUNT_QUOTA_SCOPES:
+        account_limit = 2 if getattr(user, "can_report_twice", False) else 1
+        if queryset.count() >= account_limit:
+            if account_limit == 1:
+                message = "每所学校限报一支队伍，您已有报名记录"
+            else:
+                message = "您的单位最多可报送两支队伍，无法继续报送"
+            raise ReportQuotaExceeded(message)
+        # 总量未满：再保证同一组别不出现两支（主要拦特许学校报两支同组别）
+        assert_report_group_unique(user, group)
+        return
+
+    limit = REPORT_QUOTA_BY_SCOPE.get(scope, DEFAULT_REPORT_QUOTA)
     if group:
         queryset = queryset.filter(group=group)
     current = queryset.count()
     if current >= limit:
         if limit != 1:
             message = "目前您的单位已超报送限制,无法再继续进行报送!"
-        elif group:
-            # 点明是哪个组别满了 —— 只说「限报一支」正是用户被误导的原因
-            message = "%s每所学校限报一支队伍，您已有报名记录" % group
         else:
             message = "每所学校限报一支队伍，您已有报名记录"
         raise ReportQuotaExceeded(message)
@@ -245,6 +290,41 @@ def _person(item, index, complete=False):
     result["age"] = _integer(item.get("age"), "person[%s].age" % index)
     result["position"] = _integer(item.get("position"), "person[%s].position" % index, complete, 0)
     result["type"] = _integer(item.get("type"), "person[%s].type" % index, complete, 0)
+    # 署名排序：可空；填了必须 ≥1 的整数（0/负数/字符串在前端就该拦住，这里兜底 400）
+    result["signature_order"] = _integer(item.get("signature_order"), "person[%s].signature_order" % index, False, 1)
+    # 表内行下标：可空；填了必须 ≥0 的整数（下标从 0 起，故下限是 0 不是 1）
+    result["display_order"] = _integer(item.get("display_order"), "person[%s].display_order" % index, False, 0)
+    return result
+
+
+# 官方用餐时段数（apps/api/registration_form.MEALS 的长度）；core 不反向依赖 api
+_DINNER_SLOTS = 6
+
+
+def _dinner_counts(value, field):
+    """用餐预约人数（草稿路径严格校验）：null 或 ≤6 长度数组，元素 null/非负整数。
+
+    与 dinner_reservation 并行、按下标对齐 6 个官方用餐时段，counts[i]>0 表示
+    第 i 时段订 N 人。0 是合法值（明确占位）；负数/非整数/超长直接 400。
+    直传 create/update_report 路径的宽松规整在 services._dinner_counts。
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise DraftError("%s 必须是数组" % field)
+    if len(value) > _DINNER_SLOTS:
+        raise DraftError("%s 最多 %d 项（对应 6 个用餐时段）" % (field, _DINNER_SLOTS))
+    result = []
+    for index, item in enumerate(value):
+        if item is None:
+            result.append(None)
+            continue
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise DraftError("%s[%s] 必须是 null 或整数" % (field, index))
+        if item < 0:
+            raise DraftError("%s[%s] 不能小于 0" % (field, index))
+        result.append(item)
+    result += [None] * (_DINNER_SLOTS - len(result))
     return result
 
 
@@ -269,6 +349,8 @@ def normalize_draft_payload(raw):
             if value is not None and not isinstance(value, (list, dict)):
                 raise DraftError("dinner_reservation 必须是数组或对象")
             result[field] = value
+        elif field == "dinner_reservation_counts":
+            result[field] = _dinner_counts(value, field)
         else:
             result[field] = _string(value, field, maximum=_FIELD_LIMITS.get(field, 255))
     people = raw.get("person", [])
@@ -303,6 +385,8 @@ def payload_from_report(report):
     result["spectrum"] = str(report.spectrum) if report.spectrum is not None else None
     result["file"] = str(report.file) if report.file is not None else None
     result["dinner_reservation"] = report.dinner_reservation or []
+    # 与 dinner_reservation 同款：空列回显 []（前端把 null/[] 都当「未填」即可）
+    result["dinner_reservation_counts"] = report.dinner_reservation_counts or []
     result["person"] = []
     for link in ReportPerson.objects.filter(report_id=report.id):
         person = Person.objects.filter(pk=link.person_id).first()
@@ -314,6 +398,8 @@ def payload_from_report(report):
             "gender": person.gender, "major": person.major, "head": person.head,
             "instrument": person.instrument, "other": person.other, "remark": person.remark,
             "position": link.position, "type": link.type,
+            "signature_order": link.signature_order,
+            "display_order": link.display_order,
         })
     return result
 
@@ -326,7 +412,7 @@ def create_report_from_submission(user, submission, scope=None):
     外层事务，SQLite 下 select_for_update() 是空操作，属于验证盲区（见 P2-5）。
     """
     lock_user_slot(user.id)
-    # 按组别计配额（每校每个组别一支），见 assert_report_quota 的说明
+    # 默认每校 1 支；can_report_twice 特许学校 2 支且每组别 1 支，见 assert_report_quota
     assert_report_quota(user, scope, submission.report.get("group"))
     ok, stored = store_people(user, list(submission.people))
     if not ok:
@@ -339,6 +425,12 @@ def create_report_from_submission(user, submission, scope=None):
 def update_rejected_report_from_submission(user, report, submission, scope=None):
     if report.user_id != user.id or report.status != -1:
         raise ReportNotRejected("当前报名状态不允许重新提交")
+    if scope in ACCOUNT_QUOTA_SCOPES:
+        # 重新提交不新增行数，账号总量不变，无需再查；但用户可能在驳回后改了组别，
+        # 必须防止两支（特许学校）被改成同一个组别。
+        group = submission.report.get("group")
+        assert_group_allowed(scope, group)
+        assert_report_group_unique(user, group, exclude_report_id=report.id)
     ok, stored = store_people(user, list(submission.people))
     if not ok:
         raise InvalidSubmission(stored)

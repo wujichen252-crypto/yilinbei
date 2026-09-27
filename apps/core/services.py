@@ -5,7 +5,7 @@ from datetime import datetime
 from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import (Files, Leader, Logs, Person, PersonalAccessToken,
@@ -59,7 +59,20 @@ def user_dict(user):
     return {"id": user.id, "username": user.username, "nickname": user.nickname,
             "description": user.description or "", "tel": user.tel or "",
             "leader": user.leader or "", "type": user.type,
+            "can_report_twice": bool(getattr(user, "can_report_twice", False)),
             "parent_id": user.parent_id}
+
+
+def subordinate_school_ids(city_user):
+    """归属于该市州账号的中小学账号（type=5）id 列表。
+
+    市州端查看下级学校报名情况的统一数据范围来源：parent_id 指向该市州账号。
+    """
+    return list(
+        User.objects.filter(
+            parent_id=city_user.id, type=User.TYPE_PRIMARY_SECONDARY
+        ).values_list("id", flat=True)
+    )
 
 
 def list_page(queryset, request, serializer=model_dict):
@@ -175,6 +188,71 @@ def _person_profile(item):
     return {k: v for k, v in item.items() if k in allowed}
 
 
+def _signature_order(value):
+    """署名排序的宽松规整（直传 create/update_report 路径）：正整数或 None。
+
+    bool/非数字/≤0 一律归 None，不在这里新增报错面；草稿提交路径在
+    report_drafts._person 里有严格校验（非正整数直接 400）。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _display_order(value):
+    """表内行下标的宽松规整（直传 create/update_report 路径）：非负整数或 None。
+
+    bool/非数字/负数一律归 None，不在这里新增报错面；草稿提交路径在
+    report_drafts._person 里有严格校验（负数直接 400）。
+    与 _signature_order 的唯一区别：0 是合法值（下标从 0 起）。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    if isinstance(value, int) and value >= 0:
+        return value
+    return None
+
+
+# 官方用餐时段数（apps/api/registration_form.MEALS 的长度）；core 不反向依赖 api，常量本地存
+_DINNER_SLOTS = 6
+
+
+def _dinner_counts(value):
+    """用餐预约人数的宽松规整（直传 create/update_report 路径）。
+
+    与 dinner_reservation 并行、按下标对齐 6 个官方时段，counts[i]>0 表示第 i
+    时段订 N 人。list 以外的输入整体视为没填（None），不在这里新增报错面；
+    草稿提交路径在 report_drafts 里有严格校验（非数组/负数直接 400）。
+    bool/负数/非数字归 None，数字字符串收下，不足 6 位补 None 对齐。
+    """
+    if not isinstance(value, list):
+        return None
+    result = [None] * _DINNER_SLOTS
+    for index, item in enumerate(value[:_DINNER_SLOTS]):
+        if isinstance(item, bool) or item is None:
+            continue
+        if isinstance(item, str) and item.strip().isdigit():
+            item = int(item)
+        if isinstance(item, int) and item >= 0:
+            result[index] = item
+    return result
+
+
+# 【合并删除说明】master 侧此处曾有 _person_item_id / _CARD18_RE / _normalize_card：
+#   · _normalize_card 把 18 位「自动截为后六位」——合并时**不保留**（见 models.Person.card
+#     的合并说明：静默截断正是本轮要根除的错配来源）。写入路径统一走 models.normalize_card，
+#     非法值一律在下面 store_people 的第一步整批拒绝。
+#   · _person_item_id 已被 _person_reference 取代：后者同样同时认 person_id / id 两个键名，
+#     但把「非正整数」「无效值」变成明确报错，而前者返回 None —— 那等于把越权/失效的 id
+#     静默当成「没传」而新建一条 Person，正是冻结规则第 5、6 条禁止的行为。
+
+
 @transaction.atomic
 def store_people(user, people):
     """落地一批人员，返回 (ok, [{"person_id", "position", "type"}, ...] 或 错误文案)。
@@ -255,13 +333,21 @@ def store_people(user, people):
                 setattr(person, key, value)
             person.card = card
             person.save()
+        # 【master 新功能】署名顺序与表内行下标写的是**关联行**（ReportPerson），
+        # 不是 Person 的字段。直传路径在这里做宽松规整（"3"→3、0/布尔→None、
+        # 负数→None），不新增报错面；草稿提交路径由 report_drafts._person 严格 400。
         result.append({"person_id": person.id,
                        "position": item.get("position", 0),
-                       "type": item.get("type", 0)})
+                       "type": item.get("type", 0),
+                       "signature_order": _signature_order(item.get("signature_order")),
+                       "display_order": _display_order(item.get("display_order"))})
     return True, result
 
 
 def attach_report_people(report_id, result):
+    # 重新提交前本报名的活跃关联人员（软删前留存，供下面清理比对）。
+    old_ids = set(ReportPerson.objects.filter(report_id=report_id)
+                  .values_list("person_id", flat=True))
     ReportPerson.all_objects.filter(report_id=report_id).update(deleted_at=timezone.now())
     links = []
     for item in result:
@@ -272,6 +358,67 @@ def attach_report_people(report_id, result):
             values["person_id"] = values.pop("id")
         links.append(ReportPerson(report_id=report_id, **values))
     ReportPerson.objects.bulk_create(links)
+    # 清理「本次被移除、且不再被任何报名（活跃关联）引用」的人员记录。
+    #
+    # ⚠️【合并遗留，待决策 —— 见冲突解决报告 §7】本段来自 master，其原注释写的是
+    # 「Person 是全局人员库（card 唯一）」——**该前提在身份证后 6 位口径下已经不成立**：
+    # card 现在允许重复、不再标识身份，Person 的身份基准是 Person.id，且 person_id 是
+    # 客户端可以长期持有并跨报名复用的显式引用（见 store_people 的 docstring）。
+    #
+    # 审计事实（已在本次合并中逐项核实）：
+    #   · 全库**没有任何 ForeignKey / OneToOne / ManyToMany 指向 Person**，
+    #     report_person.person_id 只是一个普通 IntegerField（无 FK、无 on_delete），
+    #     因此这里 .delete() 不会级联删除任何其他表的数据；
+    #   · 反过来说，删掉 Person 行**也不会被数据库拦下**：report_person.person_id
+    #     以及 ReportDraft.payload 里 JSON 存的 person[].id 会变成悬空引用；
+    #   · Person 没有软删除字段（只有 created_at/updated_at），所以这个删除不可逆，
+    #     该行的 phone/school/head/instrument 等档案数据一并永久丢失。
+    # 具体后果（可复现路径）：同一单位的报名表 A 重提交时删掉了张三 → 张三这行 Person
+    # 被硬删 → 用户在**另一张报名表的草稿**（或先前回显/导出的 payload）里持有的
+    # person_id 再提交时报「人员不存在（person_id=N）」。这是显式失败、不是静默错配，
+    # 但与「person_id 是可长期持有的身份锚点」这一 zyr 语义存在张力。
+    # 是否保留本段由业务决定，本次合并**未改动其行为**，只把注释改成事实。
+    new_ids = {item.get("person_id", item.get("id")) for item in result}
+    for pid in old_ids - new_ids:
+        if pid is None:
+            continue
+        if not ReportPerson.objects.filter(person_id=pid).exists():
+            Person.objects.filter(pk=pid).delete()
+
+
+# Violations of the report_person conductor/instructor rule (migration 0007:
+# partial unique index + trigger) surface as IntegrityError. Match the known
+# trigger/index diagnostics and translate them into API-facing messages; the
+# None return tells callers the error is unrelated and must be re-raised.
+# GaussDB/PostgreSQL deferred triggers raise at COMMIT, so callers must catch
+# outside their transaction.atomic() block.
+_RULE_MESSAGE_HINTS = (
+    ("指挥只能有 1 人", "每张报名表只能有 1 名指挥"),
+    ("指导老师最多 1 人", "指挥是教师时，指导老师最多 1 人"),
+    ("指导老师最多 2 人", "指挥是学生时，指导老师最多 2 人"),
+    ("只能由教师担任指挥", "中小学组别只能由教师担任指挥"),
+)
+_RULE_CONSTRAINT_HINTS = (
+    "report_person_one_conductor_idx",
+    "UNIQUE constraint failed: report_person.report_id",
+)
+
+
+def report_rule_message(exc):
+    """Friendly message for a conductor/instructor rule IntegrityError, else None."""
+    cause = getattr(exc, "__cause__", None) or exc
+    texts = [str(cause), str(exc)]
+    diag = getattr(cause, "diag", None)
+    for attr in ("message_primary", "constraint_name"):
+        value = getattr(diag, attr, None)
+        if value:
+            texts.append(str(value))
+    for marker, message in _RULE_MESSAGE_HINTS:
+        if any(marker in text for text in texts):
+            return message
+    if any(hint in text for hint in _RULE_CONSTRAINT_HINTS for text in texts):
+        return "每张报名表只能有 1 名指挥"
+    return None
 
 
 def report_dict(report, include_children=True):
