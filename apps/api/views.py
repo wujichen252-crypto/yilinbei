@@ -38,8 +38,9 @@ from apps.core.services import (BodyError, attach_report_people, failure,
                                 _dinner_counts, list_page, live_report_dict,
                                 model_dict, new_code, parse_body, report_dict,
                                 report_rule_message, store_people, success,
-                                user_dict, valid_person_head,
-                                verify_user_password, write_log)
+                                subordinate_school_ids, user_dict,
+                                valid_person_head, verify_user_password,
+                                write_log)
 
 from .auth import BearerAuth
 from .export_services import (
@@ -91,13 +92,16 @@ def request_ids(request, data=None):
     return [int(v) for v in values if str(v).isdigit()]
 
 
-def report_queryset(request, current_user=None):
+def report_queryset(request, current_user=None, user_ids=None):
     qs = Report.objects.all().order_by("id")
-    if current_user:
+    if user_ids is not None:
+        # 市州端：仅查看归属于本市州的中小学账号的报名
+        qs = qs.filter(user_id__in=user_ids)
+    elif current_user:
         qs = qs.filter(user_id=current_user.id)
     keyword = request.GET.get("keyword")
     if keyword:
-        if current_user:
+        if current_user or user_ids is not None:
             qs = qs.filter(name__icontains=keyword)
         else:
             qs = qs.filter(Q(name__icontains=keyword) | Q(choir_name__icontains=keyword))
@@ -114,8 +118,8 @@ def report_queryset(request, current_user=None):
     return qs
 
 
-def report_page(request, current_user=None, descending=False):
-    qs = report_queryset(request, current_user)
+def report_page(request, current_user=None, descending=False, user_ids=None):
+    qs = report_queryset(request, current_user, user_ids)
     if descending:
         qs = qs.order_by("-id")
     return response(list_page(qs, request, report_dict))
@@ -555,6 +559,15 @@ def user_update_admin(request):
 def user_create_admin(request, committee=False):
     data = body(request); values = {k: data.get(k) for k in ("username", "nickname", "description", "tel", "leader", "type") if k in data}
     values["parent_id"] = 0
+    # 中小学账号（type=5）可在创建时指定所属市州（parent_id 必须指向 type=1 的市州账号）
+    requested_parent = data.get("parent_id")
+    if requested_parent not in (None, "", 0, "0"):
+        parent = User.objects.filter(pk=requested_parent).first()
+        if parent is None:
+            return response(failure("上级账号不存在"))
+        if parent.type != User.TYPE_CITY:
+            return response(failure("上级账号必须是市州账号"))
+        values["parent_id"] = parent.id
     if "can_report_twice" in data:
         values["can_report_twice"] = _as_bool(data["can_report_twice"])
     if committee:
@@ -771,10 +784,15 @@ def scoped_total(request, expected, kind):
     if err: return err
     uid = request.auth.id
     if kind == "city":
+        # 市州端统计归属于本市州的中小学账号报名；中小学端仍统计本账号自身报名
+        if expected == User.TYPE_CITY:
+            report_filter = {"user_id__in": subordinate_school_ids(request.auth)}
+        else:
+            report_filter = {"user_id": uid}
         groups = [("小学组", "小学组"), ("中学组", "中学组")]
         data = []
         for group, name in groups:
-            qs = Report.objects.filter(user_id=uid, group=group)
+            qs = Report.objects.filter(group=group, **report_filter)
             data.append({"name": name, "total": qs.count(), "data1": qs.filter(status=-1).count(), "data2": qs.filter(status=0).count(), "data3": qs.filter(status=1).count()})
         return response(success("获取成功！", {"success": {"elementary": 0, "teacher": 0}, "data": data}))
     if kind == "school":
@@ -798,8 +816,16 @@ def primary_total(request): return scoped_total(request, User.TYPE_PRIMARY_SECON
 
 
 def _index_percent_payload(request):
-    """市州端/中小学端共用的 40% 口径面板（group="0" 为历史遗留的数字组别串）。"""
-    uid = request.auth.id; elementary = Report.objects.filter(user_id=uid, group="0").count(); middle = Report.objects.filter(user_id=uid, group="0", group_type=1).count() if hasattr(Report, "group_type") else 0
+    """市州端/中小学端共用的 40% 口径面板（group="0" 为历史遗留的数字组别串）。
+
+    市州端统计归属于本市州的中小学账号；中小学端统计本账号自身。
+    """
+    if request.auth.type == User.TYPE_CITY:
+        report_filter = {"user_id__in": subordinate_school_ids(request.auth)}
+    else:
+        report_filter = {"user_id": request.auth.id}
+    elementary = Report.objects.filter(group="0", **report_filter).count()
+    middle = Report.objects.filter(group="0", group_type=1, **report_filter).count() if hasattr(Report, "group_type") else 0
     ratio = (middle / elementary) if elementary else 0
     return {"data": [{"require": "中学组数量不低于中小学组报送总数40%", "pass": 1, "data": ["中学组数量所在比:" + str(round(ratio * 100, 2)) + "%"]}, {"require": "中小学组同一学校只能报送1个", "pass": 1, "data": []}, {"require": "中小学教师组同一个县（区）只能报送1个", "pass": 1, "data": []}]}
 
@@ -858,10 +884,11 @@ def establishment_stats(qs):
 
 @api.get("/city/index/establishment", auth=auth)
 def city_establishment(request):
-    # 市州口径同 /city/index/total：只统计本账号报送的报名
+    # 市州口径：统计归属于本市州的中小学账号报名
     err = role_error(request, 1)
     if err: return err
-    return response(success("获取成功！", {"data": establishment_stats(Report.objects.filter(user_id=request.auth.id))}))
+    return response(success("获取成功！", {"data": establishment_stats(
+        Report.objects.filter(user_id__in=subordinate_school_ids(request.auth)))}))
 
 
 @api.get("/primary/index/establishment", auth=auth)
@@ -1064,13 +1091,19 @@ def register_draft_routes(prefix, expected, scope):
             return _draft_error_response(DraftConflict("草稿已在其他页面创建，请刷新"))
 
 
-def register_scope_routes(prefix, expected, province=False, writable=True):
+def register_scope_routes(prefix, expected, province=False, writable=True, subordinate=False):
     """注册一个渠道的正式报名路由；writable=False 时只保留只读端点
-    （报名列表/详情、推荐列表），写入端点整体摘除（路由 404，而非 403）。"""
+    （报名列表/详情、推荐列表），写入端点整体摘除（路由 404，而非 403）。
+    subordinate=True 时只读端点的数据范围为「归属于当前市州的中小学账号」，
+    用于市州端查看下级学校报名情况。"""
     tag = prefix.strip("/").replace("/", "_")
     @api.get(prefix + "/report/list", auth=auth, operation_id=tag + "_report_list")
     def _list(request):
-        err = role_error(request, expected); return err or report_page(request, request.auth)
+        err = role_error(request, expected)
+        if err: return err
+        if subordinate:
+            return report_page(request, user_ids=subordinate_school_ids(request.auth))
+        return report_page(request, request.auth)
     if writable:
         @api.post(prefix + "/report/create", auth=auth, operation_id=tag + "_report_create")
         def _create(request):
@@ -1093,8 +1126,13 @@ def register_scope_routes(prefix, expected, province=False, writable=True):
         report = Report.objects.filter(pk=id).first()
         if err: return err
         if not report: return response(success("获取成功！", None))
-        if report.user_id != request.auth.id:
-            return response(failure("不具备该报表查看权限！", None))
+        if subordinate:
+            allowed_ids = set(subordinate_school_ids(request.auth))
+            if report.user_id not in allowed_ids:
+                return response(failure("不具备该报表查看权限！", None))
+        else:
+            if report.user_id != request.auth.id:
+                return response(failure("不具备该报表查看权限！", None))
         result = report_dict(report)
         if province:
             name = str(report.name or "")
@@ -1131,7 +1169,8 @@ def _map_pair(prefix, value):
 
 
 # 市州端（type=1）2026-09-24 起只读：草稿流与写入端点整体摘除，历史数据仍可查看。
-register_scope_routes("/city", 1, writable=False)
+# 报名查看范围为「归属于本市州的中小学账号」（parent_id 指向本市州）。
+register_scope_routes("/city", 1, writable=False, subordinate=True)
 register_draft_routes("/school", 0, ReportDraft.SCOPE_SCHOOL)
 register_scope_routes("/school", 0)
 register_scope_routes("/province", 4, True)
