@@ -35,8 +35,8 @@ from apps.core.report_drafts import (
     update_draft, update_rejected_report_from_submission,
 )
 from apps.core.services import (BodyError, attach_report_people, failure,
-                                list_page, live_report_dict, model_dict,
-                                new_code, parse_body, report_dict,
+                                _dinner_counts, list_page, live_report_dict,
+                                model_dict, new_code, parse_body, report_dict,
                                 report_rule_message, store_people, success,
                                 user_dict, valid_person_head,
                                 verify_user_password, write_log)
@@ -147,8 +147,11 @@ def create_report(request, province=False):
                 payload.pop(key, None)
             if not province:
                 payload["dinner_reservation"] = data.get("dinner_reservation") or []
+                payload["dinner_reservation_counts"] = _dinner_counts(
+                    data.get("dinner_reservation_counts"))
             else:
                 payload.pop("dinner_reservation", None)
+                payload.pop("dinner_reservation_counts", None)
             report = Report.objects.create(user_id=user.id, **payload)
             attach_report_people(report.id, stored)
     except IntegrityError as exc:
@@ -182,10 +185,14 @@ def update_report(request, on_behalf=False):
             fields = {f.name for f in Report._meta.fields}
             fields -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
             for key, value in data.items():
-                if key in fields and key not in {"status", "dinner_reservation"}:
+                if key in fields and key not in {"status", "dinner_reservation",
+                                                 "dinner_reservation_counts"}:
                     setattr(report, key, value)
             if "dinner_reservation" in fields:
                 report.dinner_reservation = data.get("dinner_reservation") or []
+                # 与 dinner_reservation 同款语义：漏传该键视为清空（现状口径）
+                report.dinner_reservation_counts = _dinner_counts(
+                    data.get("dinner_reservation_counts"))
             if not on_behalf:
                 report.user_id = user.id
             report.status = 0

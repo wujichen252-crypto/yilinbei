@@ -46,6 +46,15 @@ class DraftPayloadTests(ApiTestCase):
             {"name": "甲", "card": "c1", "position": 2, "type": 1, "display_order": 0}]})
         self.assertEqual(ok["person"][0]["display_order"], 0)
 
+    def test_normalizer_accepts_dinner_counts_and_pads_to_six(self):
+        # 用餐预约人数：null 放行；数组补齐 6 位；0 合法；布尔/负数/非整数/超长/非数组拒绝
+        ok = normalize_draft_payload({"dinner_reservation_counts": [12, 0, None], "person": []})
+        self.assertEqual(ok["dinner_reservation_counts"], [12, 0, None, None, None, None])
+        self.assertIsNone(normalize_draft_payload({"person": []})["dinner_reservation_counts"])
+        for bad in ([-1], [True], ["3"], [1.5], [None] * 7, "12"):
+            with self.assertRaises(DraftError):
+                normalize_draft_payload({"dinner_reservation_counts": bad, "person": []})
+
     def test_frontend_person_keys_match_whitelist(self):
         """前端发出的 16 个 person 键必须与 PERSON_FIELDS 完全相等。
 
@@ -242,6 +251,37 @@ class DraftApiTests(ApiTestCase):
         self.assertEqual(result.status_code, 400)
         body = json.dumps(result.json(), ensure_ascii=False)
         self.assertIn("不能小于 0", body)
+
+    # ----- 用餐预约人数（dinner_reservation_counts，与 dinner_reservation 并行对齐 6 时段）-----
+
+    def test_dinner_counts_round_trip_through_draft(self):
+        payload = self.payload(dinner_reservation=["0", "21晚"],
+                               dinner_reservation_counts=[12, 0, None, 8])
+        created = self.json_request("post", "/api/school/report/drafts", {
+            "payload": payload}).json()["data"]
+        draft = ReportDraft.objects.get(pk=int(created["draft_id"]))
+        stored = json.loads(draft.payload)
+        self.assertEqual(stored["dinner_reservation_counts"], [12, 0, None, 8, None, None])
+
+        submitted = self.json_request(
+            "post", "/api/school/report/drafts/%s/submit" % created["draft_id"],
+            {"version": created["version"]})
+        self.assertEqual(submitted.status_code, 200, submitted.content)
+        report = Report.objects.get()
+        self.assertEqual(report.dinner_reservation_counts, [12, 0, None, 8, None, None])
+
+        # 提交后重建（edit-draft → payload_from_report）也要把人数带回来
+        Report.objects.filter(pk=report.id).update(status=-1)
+        edit = self.json_request("post", "/api/school/reports/%s/edit-draft" % report.id, {})
+        self.assertEqual(edit.status_code, 200, edit.content)
+        self.assertEqual(edit.json()["data"]["payload"]["dinner_reservation_counts"],
+                         [12, 0, None, 8, None, None])
+
+    def test_dinner_counts_rejects_negative_and_non_integer(self):
+        for bad in ([-1], ["3"], [True], [None] * 7, "12"):
+            payload = self.payload(dinner_reservation_counts=bad)
+            result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
+            self.assertEqual(result.status_code, 400, "counts=%r 应拒绝" % (bad,))
 
     # ----- 回归：市州端只读化（2026-09-24），写入端点整体摘除而非 403 -----
     def test_city_write_routes_are_removed(self):

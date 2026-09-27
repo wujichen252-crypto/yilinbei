@@ -171,6 +171,30 @@ class RegistrationFormContextTests(ApiTestCase):
 
         self.assertEqual(cells, ["√", "", "", "√", "√", ""])
 
+    def test_meal_counts_render_numbers_and_win_over_ticks(self):
+        # 人数 >0 的格子直接印人数（附件2：在对应位置写上就餐人数），优先于字符串勾选；
+        # 0/空不算订、也不覆盖勾选
+        self.report.dinner_reservation = [0, "21晚"]
+        self.report.dinner_reservation_counts = [12, 0, None, 8]
+        self.report.save(update_fields=["dinner_reservation", "dinner_reservation_counts"])
+        cells = form_context(self.report)["meal_cells"]
+
+        self.assertEqual(cells, ["12", "", "", "8", "", ""])
+
+    def test_meal_counts_zero_falls_back_to_tick(self):
+        # counts=0 表示该时段没填人数，回到字符串勾选的 √
+        self.report.dinner_reservation = ["0"]
+        self.report.dinner_reservation_counts = [0]
+        self.report.save(update_fields=["dinner_reservation", "dinner_reservation_counts"])
+        self.assertEqual(form_context(self.report)["meal_cells"][0], "√")
+
+    def test_meal_counts_alone_reserve_slots(self):
+        # 只传人数不传字符串：counts[i]>0 即视为订了该时段
+        self.report.dinner_reservation = []
+        self.report.dinner_reservation_counts = [None, None, None, None, None, 5]
+        self.report.save(update_fields=["dinner_reservation", "dinner_reservation_counts"])
+        self.assertEqual(form_context(self.report)["meal_cells"], ["", "", "", "", "", "5"])
+
     def test_unmatched_meal_entry_moves_to_remark(self):
         self.report.dinner_reservation = ["10月1日午宴"]
         self.report.save(update_fields=["dinner_reservation"])

@@ -87,6 +87,22 @@ class StorePeopleNoDedupTests(ApiTestCase):
         self.assertEqual(Person.objects.count(), 1)
         self.assertEqual(Person.objects.get(pk=stored[0]["person_id"]).card, "011234")
 
+    def test_person_id_key_updates_in_place(self):
+        # 详情回显桥：report_dict 的人员项外层 id 是关联行（report_person.id），
+        # Person 主键在外层 person_id 键上。编辑流按详情回显原样提交时必须
+        # 原地更新，而不是拿关联行 id 报「人员不存在」把整单挡下（驳回后编辑
+        # 删人「数据库未改」的根因）。
+        ok, stored = store_people(self.school, [self.item(name="张三", card="011234")])
+
+        ok2, _ = store_people(self.school, [
+            {"id": 987654, "person_id": stored[0]["person_id"], "name": "张三",
+             "card": "333333", "position": 0, "type": 0},
+        ])
+
+        self.assertTrue(ok2)
+        self.assertEqual(Person.objects.count(), 1)
+        self.assertEqual(Person.objects.get(pk=stored[0]["person_id"]).card, "333333")
+
     def test_stale_id_is_rejected(self):
         ok, message = store_people(self.school, [
             {"id": 999999, "name": "张三", "card": "011234",

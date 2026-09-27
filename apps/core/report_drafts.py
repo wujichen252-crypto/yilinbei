@@ -52,7 +52,7 @@ REPORT_FIELDS = {
     "choir_name", "name", "name1", "school_name", "desc", "group",
     "establishment", "establishment_name", "contact_name", "contact_phone",
     "contact_way", "time_length", "spectrum", "file", "dinner_reservation",
-    "remark", "person",
+    "dinner_reservation_counts", "remark", "person",
 }
 SERVER_FIELDS = {"user_id", "scope", "status", "report_id", "draft_id", "version",
                  "created_at", "updated_at", "submitted_at"}
@@ -273,6 +273,37 @@ def _person(item, index, complete=False):
     return result
 
 
+# 官方用餐时段数（apps/api/registration_form.MEALS 的长度）；core 不反向依赖 api
+_DINNER_SLOTS = 6
+
+
+def _dinner_counts(value, field):
+    """用餐预约人数（草稿路径严格校验）：null 或 ≤6 长度数组，元素 null/非负整数。
+
+    与 dinner_reservation 并行、按下标对齐 6 个官方用餐时段，counts[i]>0 表示
+    第 i 时段订 N 人。0 是合法值（明确占位）；负数/非整数/超长直接 400。
+    直传 create/update_report 路径的宽松规整在 services._dinner_counts。
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise DraftError("%s 必须是数组" % field)
+    if len(value) > _DINNER_SLOTS:
+        raise DraftError("%s 最多 %d 项（对应 6 个用餐时段）" % (field, _DINNER_SLOTS))
+    result = []
+    for index, item in enumerate(value):
+        if item is None:
+            result.append(None)
+            continue
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise DraftError("%s[%s] 必须是 null 或整数" % (field, index))
+        if item < 0:
+            raise DraftError("%s[%s] 不能小于 0" % (field, index))
+        result.append(item)
+    result += [None] * (_DINNER_SLOTS - len(result))
+    return result
+
+
 def normalize_draft_payload(raw):
     if not isinstance(raw, dict):
         raise DraftError("payload 必须是 JSON 对象")
@@ -294,6 +325,8 @@ def normalize_draft_payload(raw):
             if value is not None and not isinstance(value, (list, dict)):
                 raise DraftError("dinner_reservation 必须是数组或对象")
             result[field] = value
+        elif field == "dinner_reservation_counts":
+            result[field] = _dinner_counts(value, field)
         else:
             result[field] = _string(value, field, maximum=_FIELD_LIMITS.get(field, 255))
     people = raw.get("person", [])
@@ -328,6 +361,8 @@ def payload_from_report(report):
     result["spectrum"] = str(report.spectrum) if report.spectrum is not None else None
     result["file"] = str(report.file) if report.file is not None else None
     result["dinner_reservation"] = report.dinner_reservation or []
+    # 与 dinner_reservation 同款：空列回显 []（前端把 null/[] 都当「未填」即可）
+    result["dinner_reservation_counts"] = report.dinner_reservation_counts or []
     result["person"] = []
     for link in ReportPerson.objects.filter(report_id=report.id):
         person = Person.objects.filter(pk=link.person_id).first()

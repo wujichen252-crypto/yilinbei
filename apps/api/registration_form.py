@@ -156,10 +156,12 @@ def _styles():
 
 
 def _meal_cells(report):
-    """把 dinner_reservation（JSON 列表）填进 6 个用餐格。
+    """把 dinner_reservation（JSON 列表）+ dinner_reservation_counts（各时段人数）填进 6 个用餐格。
 
-    兼容三种写法：下标 0-5、完整文案（"11月20日午餐"）、简写（"20午"）。
-    无法归位的条目返回给调用方放进备注。
+    字符串兼容三种写法：下标 0-5、完整文案（"11月20日午餐"）、简写（"20午"）。
+    人数（counts[i] > 0，来自与 dinner_reservation 并行对齐的人数数组）优先于
+    勾选：对应格子直接印人数（通知附件2：在对应位置写上就餐人数）。
+    无法归位的字符串条目返回给调用方放进备注。
     """
     from apps.api.export_services import _json_list
     cells = [""] * len(MEALS)
@@ -178,6 +180,12 @@ def _meal_cells(report):
                     break
         if not matched:
             leftovers.append(text)
+    counts = _json_list(getattr(report, "dinner_reservation_counts", None))
+    for index, item in enumerate(counts[:len(MEALS)]):
+        # 0/空/垃圾 = 该时段不订或没填，不覆盖字符串勾选；正数才落格
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            continue
+        cells[index] = str(item)
     return cells, leftovers
 
 

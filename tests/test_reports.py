@@ -146,6 +146,145 @@ class ReportTransactionAndSoftDeleteTests(ApiTestCase):
                   for link in ReportPerson.objects.all()}
         self.assertEqual(orders, {"do-a": 2, "do-b": 0, "do-c": None, "do-d": None})
 
+    def test_create_coerces_dinner_counts_leniently(self):
+        # 直传路径宽松规整：数字字符串/0 收下并补齐 6 位，负数/布尔/垃圾归 None（不报错）
+        payload = self.report_payload(
+            dinner_reservation_counts=["12", 0, -1, True, "x", 3])
+
+        result = self.json_request("post", "/api/school/report/create", payload)
+
+        self.assertEqual(result.json()["code"], 0)
+        report = Report.objects.get()
+        self.assertEqual(report.dinner_reservation_counts, [12, 0, None, None, None, 3])
+
+    def test_province_create_strips_dinner_fields(self):
+        # 省级代报不受理用餐字段：与 dinner_reservation 同款整体剥离
+        province = self.create_user("province-strip", 4)
+        self.authorize_as(province)
+        payload = self.report_payload(dinner_reservation=["0"],
+                                      dinner_reservation_counts=[1, 2])
+
+        result = self.json_request("post", "/api/province/report/create", payload)
+
+        self.assertEqual(result.json()["code"], 0)
+        report = Report.objects.get()
+        self.assertEqual(report.dinner_reservation, [])
+        # 剥离后从未写入：列保持空值语义 []
+        self.assertEqual(report.dinner_reservation_counts, [])
+
+
+class RejectedReportEditPeopleTests(ApiTestCase):
+    """驳回后编辑的人员链路（组委会端 2026-09-27 反馈的两个问题）：
+
+    1. 「修改身份证存成新人员」—— 前端没把 Person id 传回来；不带 id 一律
+       新建是后六位口径的既定行为（无查重），带 id 必须原地更新。
+    2. 「删除人员数据库未改」—— 前端把详情回显的外层 id（关联行
+       report_person.id）当 Person id 传回，整单被「人员不存在」拦下。
+    本组把详情回显形（id=关联行 id + person_id=Person id）的正确行为钉死。
+    """
+
+    def setUp(self):
+        self.school = self.create_user("rej-school", 0)
+        self.committee = self.create_user("rej-committee", 2)
+        self.authorize_as(self.committee)
+        # 错位自增序列：先造 1 个占位人员 + 一条 4 关联行的占位报名，让本报名的
+        # 关联行 id 落在所有 Person id 之外 —— 否则新库里 report_person.id 与
+        # person.id 恰好相等，「传关联行 id」会静默命中错误的人，测试失真
+        decoy = Person.objects.create(name="占位", card="decoy-card", user_id=self.school.id)
+        other = self.make_report(self.school, choir_name="占位团队")
+        for _ in range(4):
+            ReportPerson.objects.create(report_id=other.id, person_id=decoy.id,
+                                        position=0, type=0)
+        self.report = self.make_report(self.school, status=-1, remark="驳回：信息有误")
+        self.people = {}
+        self.links = {}
+        for name, card, position, ptype in (
+            ("张三", "500101200001011234", 0, 0),
+            ("李四", "500101200001022345", 2, 1),
+            ("王五", "500101200001023456", 4, 1),
+        ):
+            person = Person.objects.create(name=name, card=card, user_id=self.school.id)
+            link = ReportPerson.objects.create(report_id=self.report.id,
+                                               person_id=person.id,
+                                               position=position, type=ptype)
+            self.people[name] = person
+            self.links[name] = link
+
+    def payload(self, **overrides):
+        payload = {
+            "id": self.report.id, "choir_name": "驳回编辑团队", "name": "驳回编辑节目",
+            "group": "大学组", "establishment": "管乐团", "contact_name": "联系人",
+            "contact_phone": "13800000000", "time_length": 120,
+        }
+        payload.update(overrides)
+        return payload
+
+    def echo_item(self, name, card=None, with_person_id=True):
+        """按 report_dict 详情回显的人员项形状构造：外层 id=关联行 id，
+        person_id=Person id；card 缺省用当前库里的值。"""
+        person = self.people[name]
+        item = {"id": self.links[name].id, "name": name,
+                "card": card or person.card,
+                "position": self.links[name].position, "type": self.links[name].type}
+        if with_person_id:
+            item["person_id"] = person.id
+        return item
+
+    def test_echo_shape_updates_in_place_and_deletes(self):
+        # 详情回显形整单提交：改张三身份证（18 位→后六位）+ 删王五
+        payload = self.payload(person=[
+            self.echo_item("张三", card="510101199001019999"),
+            self.echo_item("李四"),
+        ])
+
+        result = self.json_request("put", "/api/committee/report/update", payload)
+
+        self.assertEqual(result.json()["code"], 0)
+        zhang = self.people["张三"]
+        zhang.refresh_from_db()
+        self.assertEqual(zhang.card, "019999")               # 原地更新，行 id 不变
+        self.assertFalse(Person.objects.filter(name="王五").exists())   # 删除落地
+        self.report.refresh_from_db()
+        self.assertEqual(self.report.status, 0)              # 驳回态随重提复位
+        active = ReportPerson.objects.filter(report_id=self.report.id)
+        self.assertEqual({link.person_id for link in active},
+                         {zhang.id, self.people["李四"].id})
+
+    def test_link_id_only_rejects_whole_update(self):
+        # 只传关联行 id（漏 person_id）：整单拦截、数据库分毫未改 —— 宁可报错
+        # 也不能静默更新到错误的人或把人员当新建吞掉
+        payload = self.payload(person=[
+            self.echo_item("张三", card="510101199001019999", with_person_id=False),
+            self.echo_item("李四", with_person_id=False),
+        ])
+
+        result = self.json_request("put", "/api/committee/report/update", payload)
+
+        self.assertEqual(result.json()["code"], 1)
+        self.assertIn("人员不存在", result.json()["msg"])
+        zhang = self.people["张三"]
+        zhang.refresh_from_db()
+        self.assertEqual(zhang.card, "500101200001011234")   # 未被改写
+        self.assertTrue(Person.objects.filter(name="王五").exists())    # 删除未发生
+        self.assertEqual(self.report.status, -1)             # 连状态都没动
+
+    def test_update_without_person_ids_recreates_people(self):
+        # 不带 id 的既定口径（后六位、无查重）：一律新建，不再被引用的旧行由
+        # 孤儿清理回收。行 id 会变 —— 前端想保住行 id 就必须回传 Person id。
+        payload = self.payload(person=[
+            {"name": "张三", "card": "500101200001011234", "position": 0, "type": 0},
+            {"name": "李四", "card": "500101200001022345", "position": 2, "type": 1},
+        ])
+
+        result = self.json_request("put", "/api/committee/report/update", payload)
+
+        self.assertEqual(result.json()["code"], 0)
+        self.assertFalse(Person.objects.filter(name="王五").exists())
+        self.assertFalse(Person.objects.filter(pk=self.people["张三"].id).exists())
+        active = ReportPerson.objects.filter(report_id=self.report.id)
+        self.assertEqual({Person.objects.get(pk=l.person_id).name for l in active},
+                         {"张三", "李四"})
+
 
 @override_settings(
     PERSON_HEAD_ALLOWED_DOMAINS=["avatars.example.com"],

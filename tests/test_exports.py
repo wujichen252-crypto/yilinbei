@@ -94,6 +94,17 @@ class AdminExportAppendixAlignmentTests(ApiTestCase):
         self.assertEqual(row[18], "")                              # 6 个时段无一命中
         self.assertEqual(row[17], "用餐预约：周末加餐")            # 并入备注（与报名信息表 PDF 同口径）
 
+    def test_meal_counts_render_into_meal_text(self):
+        # 人数格（dinner_reservation_counts）：时段名后补「（N人）」；
+        # 纯勾选时段维持旧文本；同格既有勾选又有人数时人数优先
+        report = self.make_report(self.school, remark="", dinner_reservation=["21晚"],
+                                  dinner_reservation_counts=[12, 0, None, 8])
+        row = admin_data1_rows([report])[1]
+        self.assertEqual(row[17], "")
+        self.assertEqual(row[18], "11月20日午餐（12人）、11月21日晚餐（8人）")
+        row2 = admin_data2_rows([report])[1]
+        self.assertEqual(row2[36], "11月20日午餐（12人）、11月21日晚餐（8人）")
+
     # --- 署名排序（report_person.signature_order）---------------------------
 
     def add_instructor(self, report, name, phone, signature_order=None):

@@ -162,13 +162,47 @@ def _display_order(value):
     return None
 
 
-def _person_item_id(item):
-    """提取人员项携带的 id（草稿流是字符串、直改流可能是整数）；无效时返回 None。"""
-    raw = item.get("id")
-    if raw is None:
+# 官方用餐时段数（apps/api/registration_form.MEALS 的长度）；core 不反向依赖 api，常量本地存
+_DINNER_SLOTS = 6
+
+
+def _dinner_counts(value):
+    """用餐预约人数的宽松规整（直传 create/update_report 路径）。
+
+    与 dinner_reservation 并行、按下标对齐 6 个官方时段，counts[i]>0 表示第 i
+    时段订 N 人。list 以外的输入整体视为没填（None），不在这里新增报错面；
+    草稿提交路径在 report_drafts 里有严格校验（非数组/负数直接 400）。
+    bool/负数/非数字归 None，数字字符串收下，不足 6 位补 None 对齐。
+    """
+    if not isinstance(value, list):
         return None
-    text = str(raw).strip()
-    return int(text) if text.isdigit() else None
+    result = [None] * _DINNER_SLOTS
+    for index, item in enumerate(value[:_DINNER_SLOTS]):
+        if isinstance(item, bool) or item is None:
+            continue
+        if isinstance(item, str) and item.strip().isdigit():
+            item = int(item)
+        if isinstance(item, int) and item >= 0:
+            result[index] = item
+    return result
+
+
+def _person_item_id(item):
+    """提取人员项携带的 Person id（草稿流是字符串、直改流可能是整数）；无效时返回 None。
+
+    优先认 person_id 键：详情接口（report_dict）回显的人员项外层 id 是关联行
+    （report_person.id），Person 主键在外层 person_id / 内层 person_info.id 上；
+    前端按详情回显原样提交时只认 id 会拿错主键，把整单挡在
+    「人员不存在或已被删除」上（驳回后编辑删人“数据库未改”的根因之一）。
+    """
+    for key in ("person_id", "id"):
+        raw = item.get(key)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text.isdigit():
+            return int(text)
+    return None
 
 
 # 18 位居民身份证（前 17 位数字 + 末位数字或 X/x）。不含校验位验算，与前端口径一致。
@@ -220,6 +254,7 @@ def store_people(user, people):
         values.pop("position", None)
         values.pop("type", None)
         values.pop("id", None)
+        values.pop("person_id", None)   # 关联行回显键，不是 Person 字段
         if person:
             # 归属（user_id）与创建时间不可被提交数据改写。
             values.pop("user_id", None)

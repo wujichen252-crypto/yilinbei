@@ -236,10 +236,15 @@ def _instrument_roster(members):
 
 
 def _meal_and_remark(report):
-    """用餐预约归位到官方 6 个时段，无法归位的条目并入备注（与报名信息表 PDF 同口径）。"""
+    """用餐预约归位到官方 6 个时段，无法归位的条目并入备注（与报名信息表 PDF 同口径）。
+
+    人数格（dinner_reservation_counts，_meal_cells 合并后为数字文本）在时段名后
+    补「（N人）」；纯勾选格维持只列时段名的旧文本。
+    """
     from apps.api.registration_form import MEALS, _meal_cells
     cells, leftovers = _meal_cells(report)
-    meals = "、".join(label for label, mark in zip(MEALS, cells) if mark)
+    meals = "、".join(label if mark == "√" else f"{label}（{mark}人）"
+                      for label, mark in zip(MEALS, cells) if mark)
     parts = [str(report.remark or "")]
     if leftovers:
         parts.append("用餐预约：" + "、".join(leftovers))

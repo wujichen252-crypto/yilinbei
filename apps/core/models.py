@@ -192,6 +192,11 @@ class Report(models.Model):
     spectrum = models.IntegerField(null=True, blank=True)
     file = models.IntegerField(null=True, blank=True)
     dinner_reservation = LegacyJSONField(default=list, blank=True, null=True)
+    # 各时段就餐人数（第十二届新增）：与 dinner_reservation 并行、按下标对齐
+    # registration_form.MEALS 的 6 个官方时段；元素 null/非负整数，counts[i]>0
+    # 表示第 i 时段订 N 人。通知附件2：在对应位置写上就餐人数。渲染层在
+    # _meal_cells 与字符串勾选合并（人数优先）；不参与配额/校验。
+    dinner_reservation_counts = LegacyJSONField(default=list, blank=True, null=True)
     status = models.IntegerField(default=0, null=True, blank=True)
     remark = models.CharField(max_length=255, null=True, blank=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
