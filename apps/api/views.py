@@ -521,10 +521,15 @@ def admin_recommend_list(request):
 
 def user_list(request):
     # 省级（4）为无效数据，admin 与 committee 展示学校（0）、市级（1）与中小学端（5）
-    qs = User.objects.filter(type__in=(0, 1, User.TYPE_PRIMARY_SECONDARY)).order_by("id"); keyword = request.GET.get("keyword")
+    allowed_types = (0, 1, User.TYPE_PRIMARY_SECONDARY)
+    qs = User.objects.filter(type__in=allowed_types).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
     nickname = request.GET.get("nickname")
     if nickname: qs = qs.filter(nickname__icontains=nickname)
+    # 账号类型筛选只能在展示范围内，不能借 type 参数越权看到省级/管理员账号
+    account_type = request.GET.get("type")
+    if account_type not in (None, "") and str(account_type).lstrip("-").isdigit():
+        qs = qs.filter(type=int(account_type))
     return response(list_page(qs, request, user_dict))
 
 
