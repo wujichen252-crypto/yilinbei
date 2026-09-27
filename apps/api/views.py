@@ -105,6 +105,12 @@ def report_queryset(request, current_user=None):
         qs = qs.filter(status=request.GET.get("status"))
     if request.GET.get("group") not in (None, ""):
         qs = qs.filter(group=request.GET.get("group"))
+    choir_name = request.GET.get("choir_name")
+    if choir_name:
+        qs = qs.filter(choir_name__icontains=choir_name)
+    school_name = request.GET.get("school_name")
+    if school_name:
+        qs = qs.filter(school_name__icontains=school_name)
     return qs
 
 
@@ -506,6 +512,8 @@ def user_list(request):
     # 省级（4）为无效数据，admin 与 committee 展示学校（0）、市级（1）与中小学端（5）
     qs = User.objects.filter(type__in=(0, 1, User.TYPE_PRIMARY_SECONDARY)).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
+    nickname = request.GET.get("nickname")
+    if nickname: qs = qs.filter(nickname__icontains=nickname)
     return response(list_page(qs, request, user_dict))
 
 
