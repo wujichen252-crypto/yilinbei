@@ -554,13 +554,26 @@ def admin_recommend_list(request):
     return err or response(list_page(Recommend.objects.all().order_by("-created_at"), request, recommend_dict))
 
 
+# 用户管理两侧的数据范围口径：省级（4）为无效数据，任何一侧不出现；
+# 学校（0）、市州（1）、中小学端（5）两侧都有；组委会（2）只在管理员侧
+# 展示/导出（2026-09-28 起）；管理员（3）任何一侧都不可见、不可触达。
+COMMITTEE_USER_TYPES = (0, 1, User.TYPE_PRIMARY_SECONDARY)
+ADMIN_USER_TYPES = COMMITTEE_USER_TYPES + (User.TYPE_COMMITTEE,)
+
+
+def _committee_type_scope(request):
+    """组委会（type=2）调用方的用户管理目标范围：只能是市州/学校/中小学账号。
+
+    越界目标（管理员、其他组委会账号）与「不存在」同判，不暴露其存在性；
+    管理员调用方不设限。范围与 user_list 的展示口径一致。
+    """
+    return Q(type__in=COMMITTEE_USER_TYPES) if request.auth.type == User.TYPE_COMMITTEE else Q()
+
+
 def user_list(request, show_committee=False):
-    # 省级（4）为无效数据，两侧都展示学校（0）、市级（1）与中小学端（5）。
-    # 组委会（2）只在管理员侧展示（2026-09-28 起）：此前管理员创建组委会账号后
-    # 列表里找不到它，页面无从重置密码/修改；组委会侧维持不见其他组委会账号。
-    allowed_types = (0, 1, User.TYPE_PRIMARY_SECONDARY)
-    if show_committee:
-        allowed_types += (User.TYPE_COMMITTEE,)
+    # 组委会（2）此前管理员创建后在列表里找不到，页面无从重置密码/修改；
+    # 2026-09-28 起管理员侧放开展示，组委会侧维持不见其他组委会账号。
+    allowed_types = ADMIN_USER_TYPES if show_committee else COMMITTEE_USER_TYPES
     qs = User.objects.filter(type__in=allowed_types).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
     nickname = request.GET.get("nickname")
@@ -587,14 +600,80 @@ def _as_bool(value):
     return False
 
 
-def user_update_admin(request):
-    data = body(request); user = User.all_objects.filter(pk=data.get("id")).first()
-    if not user: return response(failure("用户不存在"))
-    # can_report_twice 是报名特许，只能由管理员/组委会授予，单独归一化，不能让学校自助提权
-    for k in ("username", "nickname", "description", "tel", "leader", "type", "parent_id"):
-        if k in data: setattr(user, k, data[k])
-    if "can_report_twice" in data:
+def _account_type(user):
+    """把 user.type 归一成 int；解析不出时返回 None，绝不抛异常。
+
+    两个 helper（_apply_parent_id / _apply_can_report_twice）与守卫共用此函数，
+    保证对同一字符串 "5" / "0" 的判断口径一致，避免"守卫放行、helper 按中小学处理"的分叉。
+    """
+    raw = getattr(user, "type", None)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_parent_id(user, requested_parent):
+    """设置账号的所属市州（parent_id），保证不变量：**只有中小学账号（type=5）才能有上级市州**。
+
+    【必须在 user.type 已经定下来之后调用】本函数用 user.type 做判据。
+
+    【非中小学归 0 而不是报错】user_update_admin 是整对象更新 —— 库里一条 type=0 +
+    parent_id=某市州 的脏数据，如果这里报错，管理员连它的名字都改不了。
+    【非中小学归 0 而不是保持原值】保持原值 = 脏数据永远洗不掉。
+    """
+    if _account_type(user) != User.TYPE_PRIMARY_SECONDARY:
+        user.parent_id = 0              # 不该有上级 → 自愈
+        return None
+    if requested_parent in (None, "", 0, "0"):
+        user.parent_id = 0
+        return None
+    parent = User.objects.filter(pk=requested_parent).first()
+    if parent is None:
+        return response(failure("上级账号不存在"))
+    if parent.type != User.TYPE_CITY:
+        return response(failure("上级账号必须是市州账号"))
+    user.parent_id = parent.id
+    return None
+
+
+def _apply_can_report_twice(user, data):
+    """设置账号的「可报两支」特许，保证不变量：**只有中小学账号（type=5）才可能有它**。
+
+    【必须在 user.type 已经定下来之后调用】本函数用 user.type 做判据，
+    与 _apply_parent_id 同规矩。
+
+    【为什么非中小学是「归 false」而不是报错】
+    user_update_admin 是**整对象更新** —— 库里一条 type=0 + can_report_twice=true
+    的脏数据，如果这里报错，管理员连它的名字都改不了（与 _apply_parent_id 同一个理由）。
+
+    【为什么非中小学是「归 false」而不是「保持原值」】
+    保持原值 = 脏数据永远洗不掉：「修改用户」弹窗发整行深拷贝，user_dict 把
+    can_report_twice 也返回，于是界面上看不到勾选框，但请求体里带着库里的 true；
+    后端 if "can_report_twice" in data 照收 → 写回去还是 true。
+    """
+    if _account_type(user) != User.TYPE_PRIMARY_SECONDARY:
+        user.can_report_twice = False          # 不该有 → 自愈
+        return
+    if "can_report_twice" in data:             # 是中小学 → 只有调用方真传了才改
         user.can_report_twice = _as_bool(data["can_report_twice"])
+
+
+def user_update_admin(request):
+    data = body(request)
+    user = User.all_objects.filter(Q(pk=data.get("id")) & _committee_type_scope(request)).first()
+    if not user: return response(failure("用户不存在"))
+    # can_report_twice 是报名特许、parent_id 是所属市州，都只能由管理员/组委会授予，
+    # 不能让学校自助提权；两个字段的类型判据交给下面的 helper。
+    for k in ("username", "nickname", "description", "tel", "leader", "type"):
+        if k in data: setattr(user, k, data[k])
+    # 【顺序不能变】下面两个 helper 都读 user.type，必须等上面把 type 定下来。
+    # parent_id 只要被传了、或账号不是中小学，都要走一遍校验/自愈；
+    # can_report_twice 无条件走一遍（非中小学自动归 false）。
+    if "parent_id" in data or _account_type(user) != User.TYPE_PRIMARY_SECONDARY:
+        err = _apply_parent_id(user, data.get("parent_id"))
+        if err: return err
+    _apply_can_report_twice(user, data)
     if "password" in data: user.set_password(RESET_PASSWORD_DEFAULT)
     user.save(); write_log(request.auth, 1, "修改用户 " + user.username)
     return response(success())
@@ -603,19 +682,31 @@ def user_update_admin(request):
 def user_create_admin(request, committee=False):
     data = body(request); values = {k: data.get(k) for k in ("username", "nickname", "description", "tel", "leader", "type") if k in data}
     values["parent_id"] = 0
+    if committee:
+        values["type"] = 0                       # ← 先定死类型
+    # 【类型归一化提到两个校验之前】parent_id 与 can_report_twice 两处判据都要用它；
+    # committee 那行已经在上面执行过，所以这里读到的一定是最终类型。
+    try:
+        new_type = int(values.get("type"))
+    except (TypeError, ValueError):
+        new_type = None
     # 中小学账号（type=5）可在创建时指定所属市州（parent_id 必须指向 type=1 的市州账号）
     requested_parent = data.get("parent_id")
     if requested_parent not in (None, "", 0, "0"):
+        if new_type != User.TYPE_PRIMARY_SECONDARY:
+            return response(failure("只有中小学账号可以设置所属市州"))
         parent = User.objects.filter(pk=requested_parent).first()
         if parent is None:
             return response(failure("上级账号不存在"))
         if parent.type != User.TYPE_CITY:
             return response(failure("上级账号必须是市州账号"))
         values["parent_id"] = parent.id
+    # 「可报两支」是中小学合并办学的特许，其它类型一律拒绝。
+    # 显式 false 放行（前端在非中小学账号上发的就是这个形状，不能误伤）。
     if "can_report_twice" in data:
         values["can_report_twice"] = _as_bool(data["can_report_twice"])
-    if committee:
-        values["type"] = 0
+        if values["can_report_twice"] and new_type != User.TYPE_PRIMARY_SECONDARY:
+            return response(failure("只有中小学账号可以报送两支队伍"))
     user = User(**values)
     user.set_password(data.get("password", "")); user.save()
     write_log(request.auth, 2, "创建用户用户 " + user.username)
@@ -623,19 +714,29 @@ def user_create_admin(request, committee=False):
 
 
 def user_delete_admin(request):
-    ids = request_ids(request, body(request)); User.objects.filter(id__in=ids).exclude(id=1).update(deleted_at=timezone.now())
+    ids = request_ids(request, body(request))
+    # 组委会侧只能删 COMMITTEE_USER_TYPES 范围内的账号，管理员侧不设限。
+    # 软删前先把下属账号的 parent_id 归零，避免市州被删后中小学账号 parent_id 悬空
+    # （parent 外键 db_constraint=False + on_delete=DO_NOTHING，不会级联，必须手动清理）。
+    children = User.objects.filter(parent_id__in=ids)
+    if children.exists():
+        children.update(parent_id=0)
+    User.objects.filter(Q(id__in=ids) & _committee_type_scope(request)).exclude(id=1).update(deleted_at=timezone.now())
     return response(success())
 
 
 def user_restore_admin(request):
-    ids = request_ids(request, body(request)); User.all_objects.filter(id__in=ids).update(deleted_at=None)
+    ids = request_ids(request, body(request))
+    User.all_objects.filter(Q(id__in=ids) & _committee_type_scope(request)).update(deleted_at=None)
     return response(success())
 
 
-def user_export_admin(request):
-    qs = User.objects.all() if request.auth.type == 2 else User.objects.filter(type__in=(0, User.TYPE_PRIMARY_SECONDARY))
+def user_export_admin(request, show_committee=False):
+    # 导出范围与用户列表一致：组委会账号只进管理员侧导出。此前组委会侧导出
+    # 是 User.objects.all()，连管理员账号都整表带出；管理员侧则漏了市州/组委会。
+    qs = User.objects.filter(type__in=ADMIN_USER_TYPES if show_committee else COMMITTEE_USER_TYPES)
     rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "备注"]]
-    rows += [[x.username, x.nickname, "初始密码为scdyz@2023，请登陆系统后修改密码，密码找回请联系省级行政部门。", x.leader, x.tel, x.description] for x in qs]
+    rows += [[x.username, x.nickname, "初始密码为scylb@2026", x.leader, x.tel, x.description] for x in qs]
     return xlsx_response(rows, request.auth.username + ".xlsx")
 
 
@@ -658,14 +759,16 @@ def register_user_routes(prefix, expected):
         err = role_error(request, expected); return err or user_create_admin(request, committee)
     @api.get(prefix + "/user/export", auth=auth, operation_id=tag + "_user_export")
     def _export(request):
-        err = role_error(request, expected); return err or user_export_admin(request)
+        err = role_error(request, expected)
+        # 导出与列表同一口径：组委会账号只进管理员侧导出
+        return err or user_export_admin(request, show_committee=(expected == 3))
     @api.delete(prefix + "/user/", auth=auth, operation_id=tag + "_user_delete")
     def _delete(request):
         err = role_error(request, expected); return err or user_delete_admin(request)
     @api.get(prefix + "/user/{id}", auth=auth, operation_id=tag + "_user_info")
     def _info(request, id: int):
         err = role_error(request, expected)
-        user = User.objects.filter(pk=id).first()
+        user = User.objects.filter(Q(pk=id) & _committee_type_scope(request)).first()
         return err or response(success("获取成功", user_dict(user)))
 
 

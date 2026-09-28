@@ -136,18 +136,28 @@ class ReportTwiceQuotaTests(ApiTestCase):
         self.assertFalse(self.school.can_report_twice)
 
     def test_admin_can_toggle_flag_with_various_input_shapes(self):
+        # 特许只对中小学账号（type=5）可授予；type=0 传任何值都自愈为 false。
+        primary = self.create_user("quota-prim", User.TYPE_PRIMARY_SECONDARY)
         self.authorize_as(self.admin)
+        # 中小学账号：各种真值都能落库 true
         for raw in (True, 1, "1", "true", "on"):
             result = self.json_request("put", "/api/admin/user/", {
-                "id": self.school.id, "can_report_twice": raw})
+                "id": primary.id, "can_report_twice": raw})
             self.assertEqual(result.json()["code"], 0, result.content)
-            self.school.refresh_from_db()
-            self.assertTrue(self.school.can_report_twice, raw)
+            primary.refresh_from_db()
+            self.assertTrue(primary.can_report_twice, raw)
+        # 中小学账号：各种假值都能落库 false
         for raw in (False, 0, "0", "false", "", "随便写"):
             self.json_request("put", "/api/admin/user/", {
-                "id": self.school.id, "can_report_twice": raw})
-            self.school.refresh_from_db()
-            self.assertFalse(self.school.can_report_twice, raw)
+                "id": primary.id, "can_report_twice": raw})
+            primary.refresh_from_db()
+            self.assertFalse(primary.can_report_twice, raw)
+        # 高校账号（type=0）：传 true 也会被自愈为 false（直连也塞不进）
+        result = self.json_request("put", "/api/admin/user/", {
+            "id": self.school.id, "can_report_twice": True})
+        self.assertEqual(result.json()["code"], 0, result.content)
+        self.school.refresh_from_db()
+        self.assertFalse(self.school.can_report_twice)
 
     def test_admin_can_create_user_with_flag(self):
         self.authorize_as(self.admin)
