@@ -527,6 +527,16 @@ class CardMigrationTests(TransactionTestCase):
                 return field
         self.fail("person 表没有 %s 列" % name)
 
+    def single_column_uniques_on_card(self):
+        """person 表上「只由 card 一列构成」的 UNIQUE 约束名列表。
+
+        只看模型定义看不出唯一约束在不在，必须直接问数据库。
+        """
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(cursor, "person")
+        return [name for name, spec in constraints.items()
+                if spec.get("unique") and spec.get("columns") == ["card"]]
+
     @staticmethod
     def run_command(*args):
         from io import StringIO
@@ -547,18 +557,20 @@ class CardMigrationTests(TransactionTestCase):
         card = self.column("card")
         self.assertEqual(card.internal_size, 255, "0007 阶段列宽必须仍是 255")
         self.assertFalse(card.null_ok, "0007 阶段 person.card 必须仍是 NOT NULL")
+        # UNIQUE 必须在 0007 这一步就真的没了，不能等后面收紧列宽时「顺带」没掉：
+        # 0007 的数据库侧动作是 SeparateDatabaseAndState 里的 RunPython，
+        # 这里就是它在 SQLite 上「确实改了 schema、不是只改了 migration state」的证据。
+        self.assertEqual(self.single_column_uniques_on_card(), [],
+                         "0007 阶段 person.card 的 UNIQUE 就没被摘掉")
 
         self.migrate_to(TIGHTENED)
         card = self.column("card")
         self.assertEqual(card.internal_size, 6)
         self.assertFalse(card.null_ok)
 
-        # UNIQUE 索引必须真的没了 —— 只看模型定义看不出这一点
-        with connection.cursor() as cursor:
-            constraints = connection.introspection.get_constraints(cursor, "person")
-        uniques = [name for name, spec in constraints.items()
-                   if spec.get("unique") and spec.get("columns") == ["card"]]
-        self.assertEqual(uniques, [], "person.card 上的 UNIQUE 索引没被摘掉")
+        # 收紧之后依然不许长回来
+        self.assertEqual(self.single_column_uniques_on_card(), [],
+                         "person.card 上的 UNIQUE 索引没被摘掉")
 
     def test_scenario23_command_converts_legacy_rows_and_leaves_the_rest_alone(self):
         self.migrate_to(RELAXED)
@@ -652,18 +664,60 @@ class CardMigrationTests(TransactionTestCase):
         self.assertEqual(sorted(Person.objects.values_list("pk", flat=True)), [1, 2])
 
     def test_migrations_contain_no_data_deleting_operations(self):
-        """迁移里不许出现删数据的 RunPython。
+        """迁移里不许出现删数据 / 改数据的操作。
 
         18 位 → 后 6 位不可逆，一旦迁移里藏了清理逻辑，
         部署时就会在没有人工确认的情况下永久丢掉数据。
+
+        检查分两层，缺一不可：
+
+          1. **递归**进 SeparateDatabaseAndState.database_operations。
+             person.card 去 UNIQUE 的数据库侧动作被包在这个包装层里
+             （顶层 operation 既不是 RunPython 也不是 RunSQL），
+             只看顶层会让 schema-only 的 DDL 把整条护栏绕过去。
+             嵌套层允许 RunPython，但不接受内联 RunSQL —— SQL 必须写在模块级
+             常量里，才能被下面第 2 层扫到。
+          2. 扫描模块里的字符串字面量（tokenize 只取 STRING token，注释不参与；
+             否则「没有 delete()、没有 update()」这类说明文字会把检查带偏），
+             确认不出现 INSERT/UPDATE/DELETE/TRUNCATE/DROP TABLE/DROP COLUMN。
         """
+        import io
+        import tokenize
+        from pathlib import Path
+
         from django.db.migrations import RunPython, RunSQL
 
-        for name in ("0007_card_relax_unique_and_notnull", "0008_card_last6_length"):
+        forbidden = ("DELETE", "INSERT", "UPDATE", "TRUNCATE",
+                     "DROP TABLE", "DROP COLUMN")
+
+        def flatten(operation):
+            yield operation
+            for nested in getattr(operation, "database_operations", None) or []:
+                for item in flatten(nested):
+                    yield item
+
+        for name in ("0007_card_relax_unique_and_notnull",
+                     "0008_alter_person_card",
+                     "0008_card_last6_length"):
             module = __import__("apps.core.migrations.%s" % name, fromlist=["Migration"])
-            migration = module.Migration
-            for operation in migration.operations:
+            for operation in module.Migration.operations:
                 with self.subTest(migration=name, operation=type(operation).__name__):
+                    # 顶层仍不许直接写 Python/SQL
                     self.assertNotIsInstance(operation, (RunPython, RunSQL))
                     self.assertFalse(hasattr(operation, "code"),
                                      "迁移里不得内联 SQL")
+                    for nested in flatten(operation):
+                        with self.subTest(migration=name,
+                                          nested=type(nested).__name__):
+                            self.assertNotIsInstance(nested, RunSQL)
+
+            source = Path(module.__file__).read_text(encoding="utf-8")
+            offenders = [
+                (word, token.string[:70])
+                for token in tokenize.generate_tokens(io.StringIO(source).readline)
+                if token.type == tokenize.STRING
+                for word in forbidden
+                if word in token.string.upper()
+            ]
+            self.assertEqual(offenders, [],
+                             "%s 的字符串字面量里出现了禁用的 DML 关键词" % name)
