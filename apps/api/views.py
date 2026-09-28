@@ -101,10 +101,21 @@ def report_queryset(request, current_user=None, user_ids=None):
         qs = qs.filter(user_id=current_user.id)
     keyword = request.GET.get("keyword")
     if keyword:
-        if current_user or user_ids is not None:
-            qs = qs.filter(name__icontains=keyword)
-        else:
-            qs = qs.filter(Q(name__icontains=keyword) | Q(choir_name__icontains=keyword))
+        # 【2026-09-28】keyword 的匹配范围统一为「曲目名 | 乐团名 | 学校名」。
+        #
+        # 改之前这里分两支：市州/高校/中小学（user_ids 或 current_user 非空）只匹配
+        # name，管理员/组委会才额外匹配 choir_name —— 于是一个搜索框在不同身份的页面上
+        # 搜的范围不一样，前端只能摆三个输入框（keyword + choir_name + school_name）
+        # 让用户自己选搜哪个字段，而三个参数之间是 AND，同一个词填进三个框永远搜不出东西。
+        # 现在三支合一：一个框搜三个字段，与身份无关。
+        #
+        # 注意 choir_name / school_name 两个独立参数仍保留在下面，是给「只想按某一列搜」
+        # 的场景用的（本仓库前端已不再传，但外部或历史请求传了仍然生效）。
+        qs = qs.filter(
+            Q(name__icontains=keyword)
+            | Q(choir_name__icontains=keyword)
+            | Q(school_name__icontains=keyword)
+        )
     if request.GET.get("status") not in (None, ""):
         qs = qs.filter(status=request.GET.get("status"))
     if request.GET.get("group") not in (None, ""):
