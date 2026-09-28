@@ -112,15 +112,23 @@ def export_code(report):
     return _php_int("240" + raw_group + "000000") + report.id
 
 
-def person_export_blocks(user_id):
+def person_export_blocks(scope, status=1):
     """按 Laravel 的顺序取数并算出每一格要显示的文本。
 
-    与旧版一致的取数口径：Report(user_id=调用者, status>=0) ORDER BY id ASC；
-    ReportPerson 不额外排序；Person 缺失时**不丢行**（Blade 用 `?? '-'` 兜底）。
+    scope 为 Report 查询所需的归属过滤：dict（如 export_report_scope 的返回）、
+    user_id 整数（老测试沿用），或 id 列表。
+    只导出已通过(status=1)的报名；ReportPerson 不额外排序；Person 缺失时
+    **不丢行**（Blade 用 `?? '-'` 兜底）。
     """
     from apps.core.models import Person, Report, ReportPerson
 
-    reports = Report.objects.filter(user_id=user_id, status__gte=0).order_by("id")
+    if isinstance(scope, dict):
+        report_filter = scope
+    elif isinstance(scope, int):
+        report_filter = {"user_id": scope}
+    else:
+        report_filter = {"user_id__in": list(scope)}
+    reports = Report.objects.filter(**report_filter, status=status).order_by("id")
     blocks = []
     for report in reports:
         links = list(ReportPerson.objects.filter(report_id=report.id))

@@ -75,6 +75,17 @@ def subordinate_school_ids(city_user):
     )
 
 
+def export_report_scope(user):
+    """导出类接口（报名信息表/参演人员表/报送数据）的统一数据范围。
+
+    市州端（type=1）导出归属于本市的各中小学账号报名；其余账号只导自己。
+    与统计端 scoped_total 的口径对齐，避免「列表看得到、导出却是空」。
+    """
+    if user.type == User.TYPE_CITY:
+        return {"user_id__in": subordinate_school_ids(user)}
+    return {"user_id": user.id}
+
+
 def list_page(queryset, request, serializer=model_dict):
     try:
         limit = max(1, int(request.GET.get("limit", 10)))

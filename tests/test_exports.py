@@ -258,7 +258,7 @@ class PdfExportTests(ApiTestCase):
         self.authorize_as(self.school)
 
     def test_export_report_returns_pdf_with_cjk_font_resource(self):
-        self.make_report(self.school, status=0, school_name="测试学校", name1="月亮之歌")
+        self.make_report(self.school, status=1, school_name="测试学校", name1="月亮之歌")
 
         result = self.client.get("/api/export/report")
 
@@ -270,7 +270,7 @@ class PdfExportTests(ApiTestCase):
         self.assertIn(b"/Type /Font", result.content)
 
     def test_export_person_returns_pdf_and_requires_auth(self):
-        report = self.make_report(self.school, status=0)
+        report = self.make_report(self.school, status=1)
         person = Person.objects.create(
             name="正式队员", user_id=self.school.id, card=card_for("pdf"), school="测试学校"
         )

@@ -49,9 +49,9 @@ class CommitteeExportTests(ApiTestCase):
         self.city = self.create_user("city", 1)
         self.admin = self.create_user("admin", 3)
 
-        self.a_middle = self.make_report(self.school_a, group="中学组", choir_name="A校中学团")
-        self.b_middle = self.make_report(self.school_b, group="中学组", choir_name="B校中学团")
-        self.b_primary = self.make_report(self.school_b, group="小学组", choir_name="B校小学团")
+        self.a_middle = self.make_report(self.school_a, status=1, group="中学组", choir_name="A校中学团")
+        self.b_middle = self.make_report(self.school_b, status=1, group="中学组", choir_name="B校中学团")
+        self.b_primary = self.make_report(self.school_b, status=1, group="小学组", choir_name="B校小学团")
 
     # ---- 1. 组委会：按组导出整组 ----
 
@@ -95,7 +95,7 @@ class CommitteeExportTests(ApiTestCase):
     def test_every_chinese_group_value_exports_its_own_rows(self):
         """原版使用的三种中文组别（小学组/中学组/大学组）各自都能导全组。"""
 
-        university = self.make_report(self.school_b, group="大学组", choir_name="B校大学团")
+        university = self.make_report(self.school_b, status=1, group="大学组", choir_name="B校大学团")
         self.authorize_as(self.committee)
 
         for group, expected in (

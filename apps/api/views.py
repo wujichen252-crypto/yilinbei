@@ -39,6 +39,7 @@ from apps.core.services import (BodyError, attach_report_people, failure,
                                 model_dict, new_code, parse_body, report_dict,
                                 report_rule_message, store_people, success,
                                 subordinate_school_ids, user_dict,
+                                export_report_scope,
                                 valid_person_head, verify_user_password,
                                 write_log)
 
@@ -417,8 +418,9 @@ def scan_files(request):
 
 @api.get("/export/report", auth=auth)
 def export_report(request):
-    """按组委会《附件2》式样导出报名信息表，每张报名表一页。"""
-    reports = list(Report.objects.filter(user_id=request.auth.id, status__gte=0).order_by("id"))
+    """按组委会《附件2》式样导出报名信息表，每张报名表一页。只导出已通过(status=1)的报名。"""
+    reports = list(Report.objects.filter(
+        **export_report_scope(request.auth), status=1).order_by("id"))
     write_log(request.auth, 6, "导出报名信息表")
     return registration_form_response(reports, "报名信息表.pdf")
 
@@ -426,14 +428,15 @@ def export_report(request):
 @api.get("/export/person", auth=auth)
 def export_person(request):
     """参演人员信息表：按 Laravel ExportController::exportReportPerson 的实际输出复刻。"""
-    blocks = person_export_blocks(request.auth.id)
+    blocks = person_export_blocks(export_report_scope(request.auth))
     return person_export_response(request.auth, blocks, "参演人员信息表.pdf")
 
 
 @api.get("/export/data", auth=auth)
 def export_data(request):
-    # 仅导出本账号名下的报名；组委会需要全量导出请走 /admin/export/data1|data2
-    qs = Report.objects.filter(user_id=request.auth.id).order_by("id")
+    # 仅导出本账号（市州端为其下游中小学）已通过(status=1)的报名；
+    # 组委会需要全量导出请走 /admin/export/data1|data2
+    qs = Report.objects.filter(**export_report_scope(request.auth), status=1).order_by("id")
     if request.GET.get("group"):
         qs = qs.filter(group=request.GET["group"])
     write_log(request.auth, 6, "导出报送数据")

@@ -74,14 +74,14 @@ class PersonExportMappingTests(ApiTestCase):
         """
         person = Person.objects.create(
             name="张三", user_id=self.school.id, card=card, **(person_overrides or {}))
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                     position=position, type=person_type)
         return person_export_blocks(self.school.id)[-1]["rows"][0]
 
     def test_type_maps_to_chinese_and_falls_back_to_dash(self):
         person = Person.objects.create(name="张三", user_id=self.school.id, card=card_for("t1"))
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         for person_type, expected in ((0, "学生"), (1, "教师"), (2, "-"), (9, "-")):
             ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                         position=0, type=person_type)
@@ -91,7 +91,7 @@ class PersonExportMappingTests(ApiTestCase):
 
     def test_position_maps_to_chinese_and_falls_back_to_dash(self):
         person = Person.objects.create(name="张三", user_id=self.school.id, card=card_for("p1"))
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         for position in (0, 1, 2, 3, 4, 7):
             ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                         position=position, type=0)
@@ -110,7 +110,7 @@ class PersonExportMappingTests(ApiTestCase):
 
     def test_missing_person_keeps_the_row_with_dash_placeholders(self):
         """Blade 用 `?? '-'` 兜底，Person 缺失时行不能消失。"""
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         ReportPerson.objects.create(report_id=report.id, person_id=None,
                                     position=2, type=1)
         rows = person_export_blocks(self.school.id)[0]["rows"]
@@ -121,7 +121,7 @@ class PersonExportMappingTests(ApiTestCase):
         """`?? '-'` 只换 null；年龄 0 必须原样输出。"""
         person = Person.objects.create(name="张三", user_id=self.school.id,
                                        card=card_for("z1"), age=0, school="", remark=None)
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                     position=0, type=0)
         row = person_export_blocks(self.school.id)[0]["rows"][0]
@@ -131,8 +131,8 @@ class PersonExportMappingTests(ApiTestCase):
 
     def test_sequence_restarts_for_each_report(self):
         person = Person.objects.create(name="张三", user_id=self.school.id, card=card_for("s1"))
-        first = self.make_report(self.school, choir_name="第一团")
-        second = self.make_report(self.school, choir_name="第二团")
+        first = self.make_report(self.school, status=1, choir_name="第一团")
+        second = self.make_report(self.school, status=1, choir_name="第二团")
         for report, count in ((first, 3), (second, 2)):
             for _ in range(count):
                 ReportPerson.objects.create(report_id=report.id, person_id=person.id,
@@ -142,7 +142,7 @@ class PersonExportMappingTests(ApiTestCase):
 
     def test_teachers_are_not_filtered_out(self):
         person = Person.objects.create(name="李老师", user_id=self.school.id, card=card_for("t9"))
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                     position=4, type=1)
         rows = person_export_blocks(self.school.id)[0]["rows"]
@@ -164,12 +164,13 @@ class PersonExportMappingTests(ApiTestCase):
         numeric = self.make_report(self.school, group="3")
         self.assertEqual(export_code(numeric), 2403000000 + numeric.id)
 
-    def test_only_own_reports_below_status_zero_are_included(self):
+    def test_only_own_approved_reports_are_included(self):
         other = self.create_user("other", 0)
         person = Person.objects.create(name="张三", user_id=self.school.id, card=card_for("o1"))
-        mine = self.make_report(self.school, status=0)
-        self.make_report(self.school, status=-1)
-        self.make_report(other, status=0)
+        mine = self.make_report(self.school, status=1)
+        rejected = self.make_report(self.school, status=-1)   # 驳回不进导出
+        pending = self.make_report(self.school, status=0)     # 待审核不进导出
+        self.make_report(other, status=1)                     # 别校不进导出
         ReportPerson.objects.create(report_id=mine.id, person_id=person.id,
                                     position=0, type=0)
         blocks = person_export_blocks(self.school.id)
@@ -189,7 +190,7 @@ class PersonExportPdfTests(ApiTestCase):
                                            position=position, type=person_type)
 
     def test_page_is_a4_landscape(self):
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         self._make_person(report, "张三", 0)
         content = self.client.get("/api/export/person").content
         box = re.search(rb"/MediaBox \[ 0 0 ([\d.]+) ([\d.]+) \]", content)
@@ -200,7 +201,7 @@ class PersonExportPdfTests(ApiTestCase):
         self.assertGreater(width, height)
 
     def test_content_disposition_exposes_the_chinese_filename(self):
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         self._make_person(report, "张三", 0)
         disposition = self.client.get("/api/export/person")["Content-Disposition"]
         self.assertTrue(disposition.isascii(), "整条头必须是 ASCII，否则会被 MIME 编码")
@@ -243,7 +244,7 @@ class PersonExportPdfTests(ApiTestCase):
         self.assertEqual(len(re.findall(rb"/Type /Page[^s]", content)), 2)
 
     def test_long_remark_is_not_truncated(self):
-        report = self.make_report(self.school)
+        report = self.make_report(self.school, status=1)
         remark = "备注很长的一段中文内容" * 12
         person = Person.objects.create(name="张三", user_id=self.school.id,
                                        card=card_for("long"), remark=remark)

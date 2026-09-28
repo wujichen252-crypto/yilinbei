@@ -212,7 +212,7 @@ class ExportReportEndpointTests(ApiTestCase):
         self.authorize_as(self.school)
 
     def test_returns_pdf_with_official_filename(self):
-        self.make_report(self.school, status=0, school_name="测试学校")
+        self.make_report(self.school, status=1, school_name="测试学校")
 
         result = self.client.get("/api/export/report")
 
@@ -230,7 +230,7 @@ class ExportReportEndpointTests(ApiTestCase):
 
     def test_other_schools_reports_are_invisible(self):
         stranger = self.create_user("other", 0)
-        self.make_report(stranger, status=0, school_name="别校")
+        self.make_report(stranger, status=1, school_name="别校")
 
         result = self.client.get("/api/export/report")
 
@@ -238,3 +238,47 @@ class ExportReportEndpointTests(ApiTestCase):
         # 只渲染本人的报名表：无数据时仍有单页 PDF，但不包含别校内容
         self.assertTrue(result.content.startswith(b"%PDF-"))
         self.assertEqual(Report.objects.count(), 1)
+
+
+class CityScopeExportTests(ApiTestCase):
+    """市州端导出报名信息表=其下游中小学的报名，且只导已通过(status=1)。"""
+
+    def setUp(self):
+        self.city = self.create_user("city", 1, nickname="珠海市")
+        self.school_a = self.create_user("sch-a", 5, parent_id=self.city.id)
+        self.school_b = self.create_user("sch-b", 5, parent_id=self.city.id)
+        self.approved = self.make_report(self.school_a, status=1, school_name="A校")
+        self.rejected = self.make_report(self.school_a, status=-1, school_name="A校-驳回")
+        self.pending = self.make_report(self.school_a, status=0, school_name="A校-待审")
+        self.other_approved = self.make_report(self.school_b, status=1, school_name="B校")
+
+    def test_export_report_scope_matches_subordinate_schools(self):
+        from apps.core.services import export_report_scope
+
+        self.assertEqual(export_report_scope(self.city),
+                         {"user_id__in": [self.school_a.id, self.school_b.id]})
+        self.assertEqual(export_report_scope(self.school_a), {"user_id": self.school_a.id})
+
+    def test_city_export_only_approved_subordinate_reports(self):
+        """市州端导出的查询集 = 下属学校中 status=1 的报名（驳回/待审核/别校除外）。"""
+        from apps.core.services import export_report_scope
+
+        ids = list(Report.objects.filter(
+            **export_report_scope(self.city), status=1).order_by("id")
+            .values_list("id", flat=True))
+        self.assertEqual(set(ids), {self.approved.id, self.other_approved.id})
+
+    def test_school_export_only_own_approved_reports(self):
+        from apps.core.services import export_report_scope
+
+        ids = list(Report.objects.filter(
+            **export_report_scope(self.school_a), status=1).order_by("id")
+            .values_list("id", flat=True))
+        self.assertEqual(ids, [self.approved.id])
+
+    def test_city_endpoint_returns_pdf(self):
+        self.authorize_as(self.city)
+        result = self.client.get("/api/export/report")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result["Content-Type"], "application/pdf")
+        self.assertTrue(result.content.startswith(b"%PDF-"))
