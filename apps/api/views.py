@@ -541,14 +541,79 @@ def _as_bool(value):
     return False
 
 
+def _account_type(user):
+    """把 user.type 归一成 int；解析不出时返回 None，绝不抛异常。
+
+    两个 helper（_apply_parent_id / _apply_can_report_twice）与守卫共用此函数，
+    保证对同一字符串 "5" / "0" 的判断口径一致，避免"守卫放行、helper 按中小学处理"的分叉。
+    """
+    raw = getattr(user, "type", None)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_parent_id(user, requested_parent):
+    """设置账号的所属市州（parent_id），保证不变量：**只有中小学账号（type=5）才能有上级市州**。
+
+    【必须在 user.type 已经定下来之后调用】本函数用 user.type 做判据。
+
+    【非中小学归 0 而不是报错】user_update_admin 是整对象更新 —— 库里一条 type=0 +
+    parent_id=某市州 的脏数据，如果这里报错，管理员连它的名字都改不了。
+    【非中小学归 0 而不是保持原值】保持原值 = 脏数据永远洗不掉。
+    """
+    if _account_type(user) != User.TYPE_PRIMARY_SECONDARY:
+        user.parent_id = 0              # 不该有上级 → 自愈
+        return None
+    if requested_parent in (None, "", 0, "0"):
+        user.parent_id = 0
+        return None
+    parent = User.objects.filter(pk=requested_parent).first()
+    if parent is None:
+        return response(failure("上级账号不存在"))
+    if parent.type != User.TYPE_CITY:
+        return response(failure("上级账号必须是市州账号"))
+    user.parent_id = parent.id
+    return None
+
+
+def _apply_can_report_twice(user, data):
+    """设置账号的「可报两支」特许，保证不变量：**只有中小学账号（type=5）才可能有它**。
+
+    【必须在 user.type 已经定下来之后调用】本函数用 user.type 做判据，
+    与 _apply_parent_id 同规矩。
+
+    【为什么非中小学是「归 false」而不是报错】
+    user_update_admin 是**整对象更新** —— 库里一条 type=0 + can_report_twice=true
+    的脏数据，如果这里报错，管理员连它的名字都改不了（与 _apply_parent_id 同一个理由）。
+
+    【为什么非中小学是「归 false」而不是「保持原值」】
+    保持原值 = 脏数据永远洗不掉：「修改用户」弹窗发整行深拷贝，user_dict 把
+    can_report_twice 也返回，于是界面上看不到勾选框，但请求体里带着库里的 true；
+    后端 if "can_report_twice" in data 照收 → 写回去还是 true。
+    """
+    if _account_type(user) != User.TYPE_PRIMARY_SECONDARY:
+        user.can_report_twice = False          # 不该有 → 自愈
+        return
+    if "can_report_twice" in data:             # 是中小学 → 只有调用方真传了才改
+        user.can_report_twice = _as_bool(data["can_report_twice"])
+
+
 def user_update_admin(request):
     data = body(request); user = User.all_objects.filter(pk=data.get("id")).first()
     if not user: return response(failure("用户不存在"))
-    # can_report_twice 是报名特许，只能由管理员/组委会授予，单独归一化，不能让学校自助提权
-    for k in ("username", "nickname", "description", "tel", "leader", "type", "parent_id"):
+    # can_report_twice 是报名特许、parent_id 是所属市州，都只能由管理员/组委会授予，
+    # 不能让学校自助提权；两个字段的类型判据交给下面的 helper。
+    for k in ("username", "nickname", "description", "tel", "leader", "type"):
         if k in data: setattr(user, k, data[k])
-    if "can_report_twice" in data:
-        user.can_report_twice = _as_bool(data["can_report_twice"])
+    # 【顺序不能变】下面两个 helper 都读 user.type，必须等上面把 type 定下来。
+    # parent_id 只要被传了、或账号不是中小学，都要走一遍校验/自愈；
+    # can_report_twice 无条件走一遍（非中小学自动归 false）。
+    if "parent_id" in data or _account_type(user) != User.TYPE_PRIMARY_SECONDARY:
+        err = _apply_parent_id(user, data.get("parent_id"))
+        if err: return err
+    _apply_can_report_twice(user, data)
     if "password" in data: user.set_password(RESET_PASSWORD_DEFAULT)
     user.save(); write_log(request.auth, 1, "修改用户 " + user.username)
     return response(success())
@@ -557,19 +622,31 @@ def user_update_admin(request):
 def user_create_admin(request, committee=False):
     data = body(request); values = {k: data.get(k) for k in ("username", "nickname", "description", "tel", "leader", "type") if k in data}
     values["parent_id"] = 0
+    if committee:
+        values["type"] = 0                       # ← 先定死类型
+    # 【类型归一化提到两个校验之前】parent_id 与 can_report_twice 两处判据都要用它；
+    # committee 那行已经在上面执行过，所以这里读到的一定是最终类型。
+    try:
+        new_type = int(values.get("type"))
+    except (TypeError, ValueError):
+        new_type = None
     # 中小学账号（type=5）可在创建时指定所属市州（parent_id 必须指向 type=1 的市州账号）
     requested_parent = data.get("parent_id")
     if requested_parent not in (None, "", 0, "0"):
+        if new_type != User.TYPE_PRIMARY_SECONDARY:
+            return response(failure("只有中小学账号可以设置所属市州"))
         parent = User.objects.filter(pk=requested_parent).first()
         if parent is None:
             return response(failure("上级账号不存在"))
         if parent.type != User.TYPE_CITY:
             return response(failure("上级账号必须是市州账号"))
         values["parent_id"] = parent.id
+    # 「可报两支」是中小学合并办学的特许，其它类型一律拒绝。
+    # 显式 false 放行（前端在非中小学账号上发的就是这个形状，不能误伤）。
     if "can_report_twice" in data:
         values["can_report_twice"] = _as_bool(data["can_report_twice"])
-    if committee:
-        values["type"] = 0
+        if values["can_report_twice"] and new_type != User.TYPE_PRIMARY_SECONDARY:
+            return response(failure("只有中小学账号可以报送两支队伍"))
     user = User(**values)
     user.set_password(data.get("password", "")); user.save()
     write_log(request.auth, 2, "创建用户用户 " + user.username)
@@ -577,7 +654,13 @@ def user_create_admin(request, committee=False):
 
 
 def user_delete_admin(request):
-    ids = request_ids(request, body(request)); User.objects.filter(id__in=ids).exclude(id=1).update(deleted_at=timezone.now())
+    ids = request_ids(request, body(request))
+    # 软删前先把下属账号的 parent_id 归零，避免市州被删后中小学账号 parent_id 悬空
+    # （parent 外键 db_constraint=False + on_delete=DO_NOTHING，不会级联，必须手动清理）。
+    children = User.objects.filter(parent_id__in=ids)
+    if children.exists():
+        children.update(parent_id=0)
+    User.objects.filter(id__in=ids).exclude(id=1).update(deleted_at=timezone.now())
     return response(success())
 
 
@@ -588,8 +671,15 @@ def user_restore_admin(request):
 
 def user_export_admin(request):
     qs = User.objects.all() if request.auth.type == 2 else User.objects.filter(type__in=(0, User.TYPE_PRIMARY_SECONDARY))
-    rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "备注"]]
-    rows += [[x.username, x.nickname, "初始密码为scdyz@2023，请登陆系统后修改密码，密码找回请联系省级行政部门。", x.leader, x.tel, x.description] for x in qs]
+    rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "所属市州", "备注"]]
+    # 批量查市州昵称，避免逐行 N+1 查询；parent_id=0/None 对应空市州。
+    city_ids = {u.parent_id for u in qs if u.parent_id}
+    city_names = dict(User.objects.filter(id__in=city_ids).values_list("id", "nickname")) if city_ids else {}
+    rows += [[
+        x.username, x.nickname,
+        "初始密码为scdyz@2023，请登陆系统后修改密码，密码找回请联系省级行政部门。",
+        x.leader, x.tel, city_names.get(x.parent_id, ""), x.description,
+    ] for x in qs]
     return xlsx_response(rows, request.auth.username + ".xlsx")
 
 
