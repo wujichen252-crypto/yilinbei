@@ -20,7 +20,7 @@ from apps.api.person_export import (
 )
 from apps.core.models import Person, ReportPerson
 
-from .base import ApiTestCase
+from .base import ApiTestCase, card_for
 
 
 def _pdf_streams(content: bytes) -> bytes:
@@ -67,7 +67,7 @@ class PersonExportMappingTests(ApiTestCase):
     def setUp(self):
         self.school = self.create_user("school", 0)
 
-    def _row(self, person_overrides=None, position=0, person_type=0, card="c-1"):
+    def _row(self, person_overrides=None, position=0, person_type=0, card=card_for("c1")):
         """建一个人 + 一张报名表，返回那个人在导出结果里的那一行。
 
         Report 按 id ASC 输出，所以刚建的那张一定在最后。
@@ -80,7 +80,7 @@ class PersonExportMappingTests(ApiTestCase):
         return person_export_blocks(self.school.id)[-1]["rows"][0]
 
     def test_type_maps_to_chinese_and_falls_back_to_dash(self):
-        person = Person.objects.create(name="张三", user_id=self.school.id, card="t-1")
+        person = Person.objects.create(name="张三", user_id=self.school.id, card=card_for("t1"))
         report = self.make_report(self.school)
         for person_type, expected in ((0, "学生"), (1, "教师"), (2, "-"), (9, "-")):
             ReportPerson.objects.create(report_id=report.id, person_id=person.id,
@@ -90,7 +90,7 @@ class PersonExportMappingTests(ApiTestCase):
         self.assertNotIn(0, [row[5] for row in rows])
 
     def test_position_maps_to_chinese_and_falls_back_to_dash(self):
-        person = Person.objects.create(name="张三", user_id=self.school.id, card="p-1")
+        person = Person.objects.create(name="张三", user_id=self.school.id, card=card_for("p1"))
         report = self.make_report(self.school)
         for position in (0, 1, 2, 3, 4, 7):
             ReportPerson.objects.create(report_id=report.id, person_id=person.id,
@@ -105,7 +105,7 @@ class PersonExportMappingTests(ApiTestCase):
                 (("1", "女"), (1, "女"), ("0", "男"), ("男", "男"),
                  ("女", "男"), (None, "男"), ("", "男"))):
             with self.subTest(gender=stored):
-                row = self._row({"gender": stored}, card="g-%s" % index)
+                row = self._row({"gender": stored}, card=card_for("g-%s" % index))
                 self.assertEqual(row[2], expected)
 
     def test_missing_person_keeps_the_row_with_dash_placeholders(self):
@@ -120,7 +120,7 @@ class PersonExportMappingTests(ApiTestCase):
     def test_zero_values_survive_but_null_becomes_dash(self):
         """`?? '-'` 只换 null；年龄 0 必须原样输出。"""
         person = Person.objects.create(name="张三", user_id=self.school.id,
-                                       card="z-1", age=0, school="", remark=None)
+                                       card=card_for("z1"), age=0, school="", remark=None)
         report = self.make_report(self.school)
         ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                     position=0, type=0)
@@ -130,7 +130,7 @@ class PersonExportMappingTests(ApiTestCase):
         self.assertEqual(row[7], "-")      # null 才是 '-'
 
     def test_sequence_restarts_for_each_report(self):
-        person = Person.objects.create(name="张三", user_id=self.school.id, card="s-1")
+        person = Person.objects.create(name="张三", user_id=self.school.id, card=card_for("s1"))
         first = self.make_report(self.school, choir_name="第一团")
         second = self.make_report(self.school, choir_name="第二团")
         for report, count in ((first, 3), (second, 2)):
@@ -141,7 +141,7 @@ class PersonExportMappingTests(ApiTestCase):
         self.assertEqual([[row[0] for row in b["rows"]] for b in blocks], [[1, 2, 3], [1, 2]])
 
     def test_teachers_are_not_filtered_out(self):
-        person = Person.objects.create(name="李老师", user_id=self.school.id, card="t-9")
+        person = Person.objects.create(name="李老师", user_id=self.school.id, card=card_for("t9"))
         report = self.make_report(self.school)
         ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                     position=4, type=1)
@@ -166,7 +166,7 @@ class PersonExportMappingTests(ApiTestCase):
 
     def test_only_own_reports_below_status_zero_are_included(self):
         other = self.create_user("other", 0)
-        person = Person.objects.create(name="张三", user_id=self.school.id, card="o-1")
+        person = Person.objects.create(name="张三", user_id=self.school.id, card=card_for("o1"))
         mine = self.make_report(self.school, status=0)
         self.make_report(self.school, status=-1)
         self.make_report(other, status=0)
@@ -183,7 +183,7 @@ class PersonExportPdfTests(ApiTestCase):
 
     def _make_person(self, report, name, position, person_type=0):
         person = Person.objects.create(name=name, user_id=self.school.id,
-                                       card="%s-%s" % (name, report.id),
+                                       card=card_for("%s-%s" % (name, report.id)),
                                        age=17, school="测试学校")
         return ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                            position=position, type=person_type)
@@ -246,7 +246,7 @@ class PersonExportPdfTests(ApiTestCase):
         report = self.make_report(self.school)
         remark = "备注很长的一段中文内容" * 12
         person = Person.objects.create(name="张三", user_id=self.school.id,
-                                       card="long-1", remark=remark)
+                                       card=card_for("long"), remark=remark)
         ReportPerson.objects.create(report_id=report.id, person_id=person.id,
                                     position=0, type=0)
         text = _pdf_text(self.client.get("/api/export/person").content)

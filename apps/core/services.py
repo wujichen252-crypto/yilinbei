@@ -9,7 +9,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import (Files, Leader, Logs, Person, PersonalAccessToken,
-                     ReportPerson, User)
+                     ReportPerson, User, normalize_card)
 
 
 def success(msg="操作成功!", data=None):
@@ -143,6 +143,51 @@ def _person_head_error(value):
     return None if valid_person_head(value) else "头像地址必须为空，且只能使用已配置 OSS/CDN 域名的 http/https 地址"
 
 
+# Person 上不参与「原样批量拷贝」的字段：
+#   · id / created_at / updated_at —— 主键与时间戳；
+#   · name —— 走下面显式赋值，用的是已 strip 且非空的校验值，而不是 payload 原值；
+#   · user_id —— 归属单位，**只能由服务端决定**。放进来会让
+#     `POST /report {"person":[{"person_id": <他校人员>, "user_id": 999}]}`
+#     把别人的 Person 直接过户到自己名下，从而合法复用 —— 这是越权，不是便利。
+#
+# 注意 name 在这里**不等于**「客户端不可改」：新建和复用都会应用客户端提交的姓名，
+# 只是必须先过校验/清洗。真正不可改的只有 user_id。
+_PERSON_CLIENT_READONLY = {"id", "name", "user_id", "created_at", "updated_at"}
+
+
+def _person_reference(item):
+    """取出客户端显式声明的 Person 主键。返回 (True, pid_or_None) 或 (False, 错误文案)。
+
+    同时接受 `person_id` 与历史键名 `id`：前端 draftPayload.js 一直发的就是 `id`
+    （后端 PERSON_FIELDS 白名单里也只有 `id`），而新接口约定叫 person_id。
+    两个都认是为了不制造半迁移状态。
+
+    **本批内不做任何「同 card 复用同一行」的合并** —— 同一个后 6 位在这批里出现两次，
+    只要都没带 person_id，就必须老老实实建两条 Person（第 7、8 条冻结规则）。
+    """
+    raw = item.get("person_id", item.get("id"))
+    if raw in (None, ""):
+        return True, None
+    if isinstance(raw, bool):
+        # bool 是 int 的子类，True 会被当成 1 —— 那会指到 ID=1 的人身上
+        return False, "person_id 必须是正整数"
+    if isinstance(raw, int):
+        pid = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        pid = int(raw.strip())
+    else:
+        return False, "person_id 必须是正整数"
+    if pid <= 0:
+        return False, "person_id 必须是正整数"
+    return True, pid
+
+
+def _person_profile(item):
+    """Person 上可写档案字段（排除身份、归属、主键、时间戳）。"""
+    allowed = {f.name for f in Person._meta.fields} - _PERSON_CLIENT_READONLY
+    return {k: v for k, v in item.items() if k in allowed}
+
+
 def _signature_order(value):
     """署名排序的宽松规整（直传 create/update_report 路径）：正整数或 None。
 
@@ -199,95 +244,107 @@ def _dinner_counts(value):
     return result
 
 
-def _person_item_id(item):
-    """提取人员项携带的 Person id（草稿流是字符串、直改流可能是整数）；无效时返回 None。
-
-    优先认 person_id 键：详情接口（report_dict）回显的人员项外层 id 是关联行
-    （report_person.id），Person 主键在外层 person_id / 内层 person_info.id 上；
-    前端按详情回显原样提交时只认 id 会拿错主键，把整单挡在
-    「人员不存在或已被删除」上（驳回后编辑删人“数据库未改”的根因之一）。
-    """
-    for key in ("person_id", "id"):
-        raw = item.get(key)
-        if raw is None:
-            continue
-        text = str(raw).strip()
-        if text.isdigit():
-            return int(text)
-    return None
-
-
-# 18 位居民身份证（前 17 位数字 + 末位数字或 X/x）。不含校验位验算，与前端口径一致。
-_CARD18_RE = re.compile(r"^\d{17}[\dXx]$")
-
-
-def _normalize_card(value):
-    """身份证后六位口径（2026-09-27 起）：18 位全号自动截为后六位，其余 strip 原样。
-
-    迁移 0013 已把历史 18 位归一化成后六位；这里对写入路径做同样处理，
-    让旧页面/导入模板传上来的全号在落库前就统一成后六位。
-    """
-    card = str(value if value is not None else "").strip()
-    if _CARD18_RE.match(card):
-        return card[-6:]
-    return card
+# 【合并删除说明】master 侧此处曾有 _person_item_id / _CARD18_RE / _normalize_card：
+#   · _normalize_card 把 18 位「自动截为后六位」——合并时**不保留**（见 models.Person.card
+#     的合并说明：静默截断正是本轮要根除的错配来源）。写入路径统一走 models.normalize_card，
+#     非法值一律在下面 store_people 的第一步整批拒绝。
+#   · _person_item_id 已被 _person_reference 取代：后者同样同时认 person_id / id 两个键名，
+#     但把「非正整数」「无效值」变成明确报错，而前者返回 None —— 那等于把越权/失效的 id
+#     静默当成「没传」而新建一条 Person，正是冻结规则第 5、6 条禁止的行为。
 
 
 @transaction.atomic
 def store_people(user, people):
-    people = people or []
-    # 2026-09-27 口径：身份证只收后六位（18 位自动截断）、允许重复，不做任何
-    # 身份查重 —— 带 id 的项按 id 原地更新（编辑流），不带 id 的一律新建；
-    # 重提交后不再被引用的旧记录由 attach_report_people 的孤儿清理回收。
-    ids = [pid for pid in (_person_item_id(item) for item in people) if pid is not None]
-    existing_by_id = {person.id: person for person in Person.objects.filter(id__in=ids)}
+    """落地一批人员，返回 (ok, [{"person_id", "position", "type"}, ...] 或 错误文案)。
 
-    # 校验整批前置：任何一项不合法就整批不写（与 Laravel 全有或全无一致）。
+    【身份基准是 Person.id，不是 card】
+    card 现在只是「身份证后 6 位」，10^6 种取值必然碰撞，不唯一、也不能唯一。
+    所以这里**没有任何按 card 查库/合并的逻辑**：
+      · 客户端带了 person_id → 复用那一行（前提是它属于当前单位），
+        字段按本次提交更新；只有 user_id（归属单位）始终由服务端保留；
+      · 没带 person_id → 一律新建一行。哪怕同一个人（同名同后 6 位）在同一批里
+        交了两遍，也是两行 —— 这是刻意为之，不是遗漏。
+
+    【person_id 是唯一显式复用机制，且必须显式失败】
+    不存在的 id、不属于当前单位的 id，都返回明确错误；绝不静默新建，
+    也绝不把越权的 id 当没传处理 —— 后者会让越权者在毫无察觉的情况下拿到一条
+    看似成功、实则新造的人员记录。
+
+    user 参数是**生效用户**：update_report 在 on_behalf（组委会代报）时传的是
+    report.user_id，所以这里算出来的 effective_user_id 天然就是被代报单位的 id。
+    """
+    people = people or []
+    effective_user_id = getattr(user, "id", user)
+
+    # ---- 第一步：全部校验完再写第一行（保持原有的全有或全无语义）----
+    prepared = []
     for item in people:
-        card = _normalize_card(item.get("card"))
-        name = str(item.get("name", "")).strip()
-        if not card or not name:
-            return False, "身份证和姓名不能为空"
+        if not isinstance(item, dict):
+            return False, "人员数据格式不正确"
+        name = str(item.get("name") or "").strip()
+        if not name:
+            return False, "姓名不能为空"
+        ok, card = normalize_card(item.get("card"))
+        if not ok:
+            # card 校验文案里已含格式说明，拼上姓名便于用户在长表格里定位
+            return False, "%s：%s" % (name, card)
+        ok, person_id = _person_reference(item)
+        if not ok:
+            return False, "%s：%s" % (name, person_id)
         head_error = _person_head_error(item.get("head"))
         if head_error:
             return False, head_error
-        pid = _person_item_id(item)
-        if pid is not None and pid not in existing_by_id:
-            return False, "人员不存在或已被删除，请刷新页面后重新提交"
+        prepared.append((item, name, card, person_id))
 
+    # ---- 第二步：显式 person_id 的存在性 + 归属校验（一次性查库，避免 N+1）----
+    referenced = {}
+    wanted = {pid for (_, _, _, pid) in prepared if pid is not None}
+    if wanted:
+        referenced = {p.id: p for p in Person.objects.filter(id__in=wanted)}
+    for (_, name, _, person_id) in prepared:
+        if person_id is None:
+            continue
+        person = referenced.get(person_id)
+        if person is None:
+            return False, "人员不存在（person_id=%s）" % person_id
+        if person.user_id != effective_user_id:
+            return False, "人员不属于当前单位"
+
+    # ---- 第三步：写入 ----
     result = []
-    for item in people:
-        card = _normalize_card(item.get("card"))
-        pid = _person_item_id(item)
-        person = existing_by_id.get(pid) if pid is not None else None
-        values = dict(item)
-        # 18 位全号在此统一截为后六位（与迁移 0013 的历史归一化配套）。
-        values["card"] = card
-        values.pop("position", None)
-        values.pop("type", None)
-        values.pop("id", None)
-        values.pop("person_id", None)   # 关联行回显键，不是 Person 字段
-        if person:
-            # 归属（user_id）与创建时间不可被提交数据改写。
-            values.pop("user_id", None)
-            for key in {f.name for f in Person._meta.fields}:
-                if key in values:
-                    setattr(person, key, values[key])
-            person.save()
+    for (item, name, card, person_id) in prepared:
+        profile = _person_profile(item)
+        profile.pop("card", None)  # 统一走下面归一后的 card，避免未校验值覆盖
+        if person_id is None:
+            person = Person.objects.create(name=name, card=card,
+                                           user_id=effective_user_id, **profile)
         else:
-            values["user_id"] = getattr(user, "id", user)
-            person = Person.objects.create(**{k: v for k, v in values.items() if k in {
-                f.name for f in Person._meta.fields if f.name != "id"}})
-        result.append({"person_id": person.id, "position": item.get("position", 0), "type": item.get("type", 0),
+            person = referenced[person_id]
+            # 复用：档案字段按本次提交更新。name 单独赋值 —— 用上面校验过的
+            # 那份（已 strip），而不是原样拷贝 payload 里的值。
+            #
+            # 【name 必须跟着改，不能"保持既有值"】身份基准是 person_id；用户既然
+            # 显式点名了这一行，就是"我知道我在改谁"。姓名可能是更正错别字。
+            # 若这里不动 name，前端（draftPayload.js 对已有行发 id）改完姓名提交会
+            # **报成功但姓名没变** —— 静默丢弃用户显式提交的字段，比报错更坏。
+            # 同理也不能因为 name 与库里不一致就拒绝复用（那等于又拿 name 当身份）。
+            person.name = name
+            for key, value in profile.items():
+                setattr(person, key, value)
+            person.card = card
+            person.save()
+        # 【master 新功能】署名顺序与表内行下标写的是**关联行**（ReportPerson），
+        # 不是 Person 的字段。直传路径在这里做宽松规整（"3"→3、0/布尔→None、
+        # 负数→None），不新增报错面；草稿提交路径由 report_drafts._person 严格 400。
+        result.append({"person_id": person.id,
+                       "position": item.get("position", 0),
+                       "type": item.get("type", 0),
                        "signature_order": _signature_order(item.get("signature_order")),
                        "display_order": _display_order(item.get("display_order"))})
     return True, result
 
 
 def attach_report_people(report_id, result):
-    # 重新提交前本报名的活跃关联人员（软删前留存，供下面清理比对）。
-    old_ids = set(ReportPerson.objects.filter(report_id=report_id)
-                  .values_list("person_id", flat=True))
     ReportPerson.all_objects.filter(report_id=report_id).update(deleted_at=timezone.now())
     links = []
     for item in result:
@@ -298,14 +355,15 @@ def attach_report_people(report_id, result):
             values["person_id"] = values.pop("id")
         links.append(ReportPerson(report_id=report_id, **values))
     ReportPerson.objects.bulk_create(links)
-    # 清理"本次被移除、且不再被任何报名（活跃关联）引用"的人员记录：
-    # Person 是全局人员库（card 唯一），被其他报名引用的人员必须保留。
-    new_ids = {item.get("person_id", item.get("id")) for item in result}
-    for pid in old_ids - new_ids:
-        if pid is None:
-            continue
-        if not ReportPerson.objects.filter(person_id=pid).exists():
-            Person.objects.filter(pk=pid).delete()
+    # 只解除本报名与人员的关联，**不删除 Person**。
+    #
+    # 「从某张报名里移除某人」≠「删除这个人」：Person 的身份基准是 Person.id，
+    # 且 person_id 是客户端可长期持有、跨报名复用的显式引用（见 store_people）。
+    # 原先此处会在「该人员不再被任何报名引用」时物理删除 Person 行 ——
+    # 但全库没有任何 ForeignKey 指向 Person（report_person.person_id 只是普通
+    # IntegerField），删除既不会被拦下，也因 Person 无软删除字段而不可逆，
+    # 会连带丢掉 phone/school/head/instrument 等档案，并使草稿/回显里持有的
+    # person_id 变成悬空引用。该行为已废除：Person 一律保留。
 
 
 # Violations of the report_person conductor/instructor rule (migration 0007:

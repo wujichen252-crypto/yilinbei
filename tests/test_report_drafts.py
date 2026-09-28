@@ -7,7 +7,7 @@ from apps.core.report_drafts import (PERSON_FIELDS, REPORT_ALLOWED_GROUPS, Draft
                                      InvalidSubmission, assert_group_allowed, decode_payload,
                                      encode_payload, normalize_draft_payload)
 
-from .base import ApiTestCase
+from .base import ApiTestCase, card_for
 
 
 class DraftPayloadTests(ApiTestCase):
@@ -56,18 +56,29 @@ class DraftPayloadTests(ApiTestCase):
                 normalize_draft_payload({"dinner_reservation_counts": bad, "person": []})
 
     def test_frontend_person_keys_match_whitelist(self):
-        """前端发出的 16 个 person 键必须与 PERSON_FIELDS 完全相等。
+        """前端发出的 person 键必须被 PERSON_FIELDS 完整覆盖（superset，不是相等）。
 
         多一个键 → 每个报名表只要有人，暂存/提交就全部 400（报错文案
         「person[0] 存在不允许字段」用户完全看不懂）；少一个键 → 字段被静默丢。
         前端交付方案 9.1/问题 2：这是前后端这条契约目前唯一的护栏。
+
+        【合并说明：为什么从 assertEqual 改成由两个断言拼出的相等】
+        白名单现在是**两条业务线的并集**：`id`（+ 新键名 `person_id`）来自身份证
+        后 6 位改造，`signature_order` / `display_order` 来自 master 的署名排序改造。
+        当前在跑的前端（yl-frontend/draftPayload.js personToPayload）只发 14 个键，
+        还没发 person_id —— 直接断言相等会把「收得下但暂时没人发」的键误判成漂移。
+        所以拆成两句：①前端实际发的键必须全部在白名单里（护栏本体）；
+        ②白名单不得比「所有前端键 ∪ person_id」更宽（防止悄悄放宽校验）。
         """
         frontend_keys = {
             "id", "name", "card", "age", "gender", "school", "phone", "instrument",
             "head", "major", "other", "remark", "type", "position",
             "signature_order", "display_order",
         }
-        self.assertEqual(frontend_keys, PERSON_FIELDS)
+        self.assertTrue(frontend_keys <= PERSON_FIELDS,
+                        "PERSON_FIELDS 少了前端会发的键：%s" % (frontend_keys - PERSON_FIELDS))
+        self.assertEqual(PERSON_FIELDS, frontend_keys | {"person_id"},
+                         "PERSON_FIELDS 出现了前端不会发的键：%s" % (PERSON_FIELDS - frontend_keys - {"person_id"}))
 
 
 class DraftApiTests(ApiTestCase):
@@ -95,7 +106,7 @@ class DraftApiTests(ApiTestCase):
         return value
 
     def test_draft_allows_incomplete_person_role_fields(self):
-        payload = self.payload(person=[{"name": "暂未分类", "card": "draft-card"}])
+        payload = self.payload(person=[{"name": "暂未分类", "card": card_for("draft")}])
         result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json()["code"], 0)
@@ -163,9 +174,9 @@ class DraftApiTests(ApiTestCase):
 
     def test_person_signature_order_round_trips_through_draft(self):
         payload = self.payload(person=[
-            {"name": "刘老师", "card": "sig-1", "age": 30, "gender": "女",
+            {"name": "刘老师", "card": card_for("sig-1"), "age": 30, "gender": "女",
              "position": 4, "type": 1, "signature_order": 2},
-            {"name": "陈老师", "card": "sig-2", "age": 31, "gender": "男",
+            {"name": "陈老师", "card": card_for("sig-2"), "age": 31, "gender": "男",
              "position": 4, "type": 1, "signature_order": 1},
         ])
         created = self.json_request("post", "/api/school/report/drafts", {
@@ -185,7 +196,7 @@ class DraftApiTests(ApiTestCase):
     def test_person_rejects_non_positive_signature_order(self):
         for bad in (0, -1, "1"):
             payload = self.payload(person=[
-                {"name": "刘老师", "card": "sig-1", "position": 4, "type": 1,
+                {"name": "刘老师", "card": card_for("sig-1"), "position": 4, "type": 1,
                  "signature_order": bad}])
             result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
             self.assertEqual(result.status_code, 400, "signature_order=%r 应拒绝" % bad)
@@ -193,7 +204,7 @@ class DraftApiTests(ApiTestCase):
     def test_legacy_person_without_signature_order_still_saves(self):
         # 旧前端不带该键：照常保存，草稿里为 null（提交后落库 NULL，导出退回提交顺序）
         payload = self.payload(person=[
-            {"name": "刘老师", "card": "sig-1", "position": 4, "type": 1}])
+            {"name": "刘老师", "card": card_for("sig-1"), "position": 4, "type": 1}])
         result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
         self.assertEqual(result.status_code, 200)
         draft = ReportDraft.objects.get(pk=int(result.json()["data"]["draft_id"]))
@@ -204,9 +215,9 @@ class DraftApiTests(ApiTestCase):
 
     def test_person_display_order_round_trips_and_survives_resubmission(self):
         payload = self.payload(person=[
-            {"name": "王指挥", "card": "do-1", "age": 35, "gender": "男",
+            {"name": "王指挥", "card": card_for("do-1"), "age": 35, "gender": "男",
              "position": 2, "type": 1, "signature_order": 2, "display_order": 1},
-            {"name": "李老师", "card": "do-2", "age": 30, "gender": "女",
+            {"name": "李老师", "card": card_for("do-2"), "age": 30, "gender": "女",
              "position": 4, "type": 1, "signature_order": 1},
         ])
         created = self.json_request("post", "/api/school/report/drafts", {
@@ -236,7 +247,7 @@ class DraftApiTests(ApiTestCase):
     def test_person_display_order_zero_is_kept_and_negative_rejected(self):
         # 草稿路径严格校验：0 是合法行下标必须保留（不是「没有」），负数 400
         payload = self.payload(person=[
-            {"name": "王指挥", "card": "do-0", "position": 2, "type": 1,
+            {"name": "王指挥", "card": card_for("do-0"), "position": 2, "type": 1,
              "signature_order": 2, "display_order": 0}])
         result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
         self.assertEqual(result.status_code, 200)
@@ -245,7 +256,7 @@ class DraftApiTests(ApiTestCase):
         self.assertEqual(stored[0]["display_order"], 0)
 
         payload = self.payload(person=[
-            {"name": "王指挥", "card": "do-neg", "position": 2, "type": 1,
+            {"name": "王指挥", "card": card_for("do-neg"), "position": 2, "type": 1,
              "display_order": -1}])
         result = self.json_request("post", "/api/school/report/drafts", {"payload": payload})
         self.assertEqual(result.status_code, 400)
