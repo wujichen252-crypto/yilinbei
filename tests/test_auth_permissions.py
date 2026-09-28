@@ -254,8 +254,9 @@ class AdminUserManagementPrimaryTests(ApiTestCase):
         # 校级（高校端）路由对中小学端账号不可见
         self.assertEqual(self.client.get("/api/school/report/list").status_code, 403)
 
-    def test_admin_account_export_includes_primary_accounts(self):
+    def test_admin_account_export_includes_city_and_committee_accounts(self):
         self.create_user("school", 0)
+        self.create_user("city", 1)
         self.create_user("primary", 5)
         self.create_user("committee", 2)
         self.authorize_as(self.admin)
@@ -269,9 +270,9 @@ class AdminUserManagementPrimaryTests(ApiTestCase):
             self.skipTest("openpyxl 未安装，无法解析导出文件")
         rows = list(load_workbook(io.BytesIO(result.content)).active.iter_rows(values_only=True))
         usernames = {row[0] for row in rows[1:]}
-        self.assertIn("school", usernames)
-        self.assertIn("primary", usernames)
-        self.assertNotIn("committee", usernames)
+        # 导出与列表同口径（2026-09-28 起）：市州、组委会都进管理员侧导出
+        for name in ("school", "city", "primary", "committee"):
+            self.assertIn(name, usernames)
         self.assertNotIn("admin", usernames)
 
 
@@ -327,6 +328,74 @@ class CommitteeAccountVisibilityTests(ApiTestCase):
         ids = [item["id"] for item in self.client.get("/api/committee/user/list", {"type": 2}).json()["data"]]
 
         self.assertEqual(ids, [])
+
+    def test_committee_export_excludes_admin_and_committee_accounts(self):
+        """组委会导出与组委会列表同口径：只有 0/1/5（修复前是 User.objects.all() 整表导出）。"""
+        self.create_user("school", 0)
+        self.create_user("city", 1)
+        self.create_user("primary", 5)
+        self.create_user("new-committee", 2)
+        self.authorize_as(self.committee_caller)
+
+        result = self.client.get("/api/committee/user/export")
+
+        self.assertEqual(result.status_code, 200)
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl 未安装，无法解析导出文件")
+        rows = list(load_workbook(io.BytesIO(result.content)).active.iter_rows(values_only=True))
+        usernames = {row[0] for row in rows[1:]}
+        for name in ("school", "city", "primary"):
+            self.assertIn(name, usernames)
+        for name in ("new-committee", "committee-caller", "admin"):
+            self.assertNotIn(name, usernames)
+
+    def test_committee_update_cannot_modify_admin_account(self):
+        """组委会改号请求打到管理员头上：与「用户不存在」同判，昵称/类型/密码原封不动。"""
+        admin = self.create_user("admin-victim", 3)
+        original_nickname, original_password, original_type = admin.nickname, admin.password, admin.type
+        self.authorize_as(self.committee_caller)
+
+        result = self.json_request(
+            "put", "/api/committee/user/",
+            {"id": admin.id, "nickname": "被篡改", "password": "x", "type": 0},
+        )
+
+        self.assertEqual(result.json()["code"], 1)
+        admin.refresh_from_db()
+        self.assertEqual(admin.nickname, original_nickname)
+        self.assertEqual(admin.type, original_type)
+        self.assertEqual(admin.password, original_password)
+
+        # 对照：组委会对自己范围内的学校账号仍可正常修改
+        school = self.create_user("school", 0)
+        update = self.json_request("put", "/api/committee/user/", {"id": school.id, "nickname": "改好了"})
+        self.assertEqual(update.json()["code"], 0)
+        school.refresh_from_db()
+        self.assertEqual(school.nickname, "改好了")
+
+    def test_committee_delete_cannot_delete_admin_account(self):
+        admin = self.create_user("admin-victim", 3)
+        school = self.create_user("school", 0)
+        self.authorize_as(self.committee_caller)
+
+        result = self.json_request("delete", "/api/committee/user/", {"ids": [admin.id, school.id]})
+
+        self.assertEqual(result.json()["code"], 0)
+        school.refresh_from_db()
+        self.assertIsNotNone(school.deleted_at)   # 范围内的学校账号正常删
+        admin.refresh_from_db()
+        self.assertIsNone(admin.deleted_at)        # 管理员账号毫发无损
+
+    def test_committee_info_cannot_read_admin_account(self):
+        admin = self.create_user("admin-victim", 3)
+        school = self.create_user("school", 0)
+        self.authorize_as(self.committee_caller)
+
+        self.assertIsNone(self.client.get("/api/committee/user/%s" % admin.id).json()["data"])
+        found = self.client.get("/api/committee/user/%s" % school.id).json()
+        self.assertEqual(found["data"]["id"], school.id)
 
 
 @unittest.skipUnless(HAVE_BCRYPT, "bcrypt 未安装：pip install -r requirements.txt")

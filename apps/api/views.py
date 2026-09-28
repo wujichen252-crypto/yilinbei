@@ -543,13 +543,26 @@ def admin_recommend_list(request):
     return err or response(list_page(Recommend.objects.all().order_by("-created_at"), request, recommend_dict))
 
 
+# 用户管理两侧的数据范围口径：省级（4）为无效数据，任何一侧不出现；
+# 学校（0）、市州（1）、中小学端（5）两侧都有；组委会（2）只在管理员侧
+# 展示/导出（2026-09-28 起）；管理员（3）任何一侧都不可见、不可触达。
+COMMITTEE_USER_TYPES = (0, 1, User.TYPE_PRIMARY_SECONDARY)
+ADMIN_USER_TYPES = COMMITTEE_USER_TYPES + (User.TYPE_COMMITTEE,)
+
+
+def _committee_type_scope(request):
+    """组委会（type=2）调用方的用户管理目标范围：只能是市州/学校/中小学账号。
+
+    越界目标（管理员、其他组委会账号）与「不存在」同判，不暴露其存在性；
+    管理员调用方不设限。范围与 user_list 的展示口径一致。
+    """
+    return Q(type__in=COMMITTEE_USER_TYPES) if request.auth.type == User.TYPE_COMMITTEE else Q()
+
+
 def user_list(request, show_committee=False):
-    # 省级（4）为无效数据，两侧都展示学校（0）、市级（1）与中小学端（5）。
-    # 组委会（2）只在管理员侧展示（2026-09-28 起）：此前管理员创建组委会账号后
-    # 列表里找不到它，页面无从重置密码/修改；组委会侧维持不见其他组委会账号。
-    allowed_types = (0, 1, User.TYPE_PRIMARY_SECONDARY)
-    if show_committee:
-        allowed_types += (User.TYPE_COMMITTEE,)
+    # 组委会（2）此前管理员创建后在列表里找不到，页面无从重置密码/修改；
+    # 2026-09-28 起管理员侧放开展示，组委会侧维持不见其他组委会账号。
+    allowed_types = ADMIN_USER_TYPES if show_committee else COMMITTEE_USER_TYPES
     qs = User.objects.filter(type__in=allowed_types).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
     nickname = request.GET.get("nickname")
@@ -577,7 +590,8 @@ def _as_bool(value):
 
 
 def user_update_admin(request):
-    data = body(request); user = User.all_objects.filter(pk=data.get("id")).first()
+    data = body(request)
+    user = User.all_objects.filter(Q(pk=data.get("id")) & _committee_type_scope(request)).first()
     if not user: return response(failure("用户不存在"))
     # can_report_twice 是报名特许，只能由管理员/组委会授予，单独归一化，不能让学校自助提权
     for k in ("username", "nickname", "description", "tel", "leader", "type", "parent_id"):
@@ -612,17 +626,21 @@ def user_create_admin(request, committee=False):
 
 
 def user_delete_admin(request):
-    ids = request_ids(request, body(request)); User.objects.filter(id__in=ids).exclude(id=1).update(deleted_at=timezone.now())
+    ids = request_ids(request, body(request))
+    User.objects.filter(Q(id__in=ids) & _committee_type_scope(request)).exclude(id=1).update(deleted_at=timezone.now())
     return response(success())
 
 
 def user_restore_admin(request):
-    ids = request_ids(request, body(request)); User.all_objects.filter(id__in=ids).update(deleted_at=None)
+    ids = request_ids(request, body(request))
+    User.all_objects.filter(Q(id__in=ids) & _committee_type_scope(request)).update(deleted_at=None)
     return response(success())
 
 
-def user_export_admin(request):
-    qs = User.objects.all() if request.auth.type == 2 else User.objects.filter(type__in=(0, User.TYPE_PRIMARY_SECONDARY))
+def user_export_admin(request, show_committee=False):
+    # 导出范围与用户列表一致：组委会账号只进管理员侧导出。此前组委会侧导出
+    # 是 User.objects.all()，连管理员账号都整表带出；管理员侧则漏了市州/组委会。
+    qs = User.objects.filter(type__in=ADMIN_USER_TYPES if show_committee else COMMITTEE_USER_TYPES)
     rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "备注"]]
     rows += [[x.username, x.nickname, "初始密码为scdyz@2023，请登陆系统后修改密码，密码找回请联系省级行政部门。", x.leader, x.tel, x.description] for x in qs]
     return xlsx_response(rows, request.auth.username + ".xlsx")
@@ -647,14 +665,16 @@ def register_user_routes(prefix, expected):
         err = role_error(request, expected); return err or user_create_admin(request, committee)
     @api.get(prefix + "/user/export", auth=auth, operation_id=tag + "_user_export")
     def _export(request):
-        err = role_error(request, expected); return err or user_export_admin(request)
+        err = role_error(request, expected)
+        # 导出与列表同一口径：组委会账号只进管理员侧导出
+        return err or user_export_admin(request, show_committee=(expected == 3))
     @api.delete(prefix + "/user/", auth=auth, operation_id=tag + "_user_delete")
     def _delete(request):
         err = role_error(request, expected); return err or user_delete_admin(request)
     @api.get(prefix + "/user/{id}", auth=auth, operation_id=tag + "_user_info")
     def _info(request, id: int):
         err = role_error(request, expected)
-        user = User.objects.filter(pk=id).first()
+        user = User.objects.filter(Q(pk=id) & _committee_type_scope(request)).first()
         return err or response(success("获取成功", user_dict(user)))
 
 
