@@ -519,9 +519,13 @@ def admin_recommend_list(request):
     return err or response(list_page(Recommend.objects.all().order_by("-created_at"), request, recommend_dict))
 
 
-def user_list(request):
-    # 省级（4）为无效数据，admin 与 committee 展示学校（0）、市级（1）与中小学端（5）
+def user_list(request, show_committee=False):
+    # 省级（4）为无效数据，两侧都展示学校（0）、市级（1）与中小学端（5）。
+    # 组委会（2）只在管理员侧展示（2026-09-28 起）：此前管理员创建组委会账号后
+    # 列表里找不到它，页面无从重置密码/修改；组委会侧维持不见其他组委会账号。
     allowed_types = (0, 1, User.TYPE_PRIMARY_SECONDARY)
+    if show_committee:
+        allowed_types += (User.TYPE_COMMITTEE,)
     qs = User.objects.filter(type__in=allowed_types).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
     nickname = request.GET.get("nickname")
@@ -605,7 +609,9 @@ def register_user_routes(prefix, expected):
     committee = expected == 2
     @api.get(prefix + "/user/list", auth=auth, operation_id=tag + "_user_list")
     def _list(request):
-        err = role_error(request, expected); return err or user_list(request)
+        err = role_error(request, expected)
+        # 组委会账号（type=2）只进管理员侧列表；组委会侧维持隐藏
+        return err or user_list(request, show_committee=(expected == 3))
     @api.put(prefix + "/user/", auth=auth, operation_id=tag + "_user_update")
     def _update(request):
         err = role_error(request, expected); return err or user_update_admin(request)

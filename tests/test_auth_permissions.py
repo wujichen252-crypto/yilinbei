@@ -234,9 +234,9 @@ class AdminUserManagementPrimaryTests(ApiTestCase):
 
         ids = [item["id"] for item in self.client.get("/api/admin/user/list").json()["data"]]
 
-        for user in (school, city, primary):
+        # 组委会账号自 2026-09-28 起也在管理员侧列表可见
+        for user in (school, city, primary, committee):
             self.assertIn(user.id, ids)
-        self.assertNotIn(committee.id, ids)
         self.assertNotIn(self.admin.id, ids)
 
     def test_admin_creates_primary_account_that_can_access_primary_routes(self):
@@ -273,6 +273,60 @@ class AdminUserManagementPrimaryTests(ApiTestCase):
         self.assertIn("primary", usernames)
         self.assertNotIn("committee", usernames)
         self.assertNotIn("admin", usernames)
+
+
+class CommitteeAccountVisibilityTests(ApiTestCase):
+    """组委会账号（type=2）只在管理员侧的用户列表可见（2026-09-28 起）。
+
+    此前 allowed_types 固定 (0,1,5)，管理员创建组委会账号后列表里找不到它，
+    无从重置密码/修改；修复后管理员侧放开，组委会侧维持不见其他组委会账号。
+    """
+
+    def setUp(self):
+        self.admin = self.create_user("admin", 3)
+        self.committee_caller = self.create_user("committee-caller", 2)
+
+    def test_admin_list_shows_committee_account_and_search_finds_it(self):
+        committee = self.create_user("new-committee", 2, nickname="省组委会")
+        self.authorize_as(self.admin)
+
+        ids = [item["id"] for item in self.client.get("/api/admin/user/list").json()["data"]]
+        self.assertIn(committee.id, ids)
+
+        found = self.client.get("/api/admin/user/list", {"keyword": "new-committee"}).json()["data"]
+        self.assertEqual([item["id"] for item in found], [committee.id])
+
+    def test_admin_type_filter_can_narrow_to_committee_accounts(self):
+        school = self.create_user("school", 0)
+        committee = self.create_user("new-committee", 2)
+        self.authorize_as(self.admin)
+
+        data = self.client.get("/api/admin/user/list", {"type": 2}).json()["data"]
+        ids = [item["id"] for item in data]
+
+        # type=2 精确收窄：新建的组委会账号和 setUp 里的组委会调用者都在列，学校不在
+        self.assertIn(committee.id, ids)
+        self.assertIn(self.committee_caller.id, ids)
+        self.assertNotIn(school.id, ids)
+        self.assertEqual({item["type"] for item in data}, {2})
+
+    def test_committee_list_still_hides_committee_accounts(self):
+        school = self.create_user("school", 0)
+        committee = self.create_user("new-committee", 2)
+        self.authorize_as(self.committee_caller)
+
+        ids = [item["id"] for item in self.client.get("/api/committee/user/list").json()["data"]]
+
+        self.assertIn(school.id, ids)
+        self.assertNotIn(committee.id, ids)
+
+    def test_committee_type_filter_cannot_surface_committee_accounts(self):
+        self.create_user("new-committee", 2)
+        self.authorize_as(self.committee_caller)
+
+        ids = [item["id"] for item in self.client.get("/api/committee/user/list", {"type": 2}).json()["data"]]
+
+        self.assertEqual(ids, [])
 
 
 @unittest.skipUnless(HAVE_BCRYPT, "bcrypt 未安装：pip install -r requirements.txt")
