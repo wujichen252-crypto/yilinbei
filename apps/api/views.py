@@ -724,15 +724,8 @@ def user_export_admin(request, show_committee=False):
     # 导出范围与用户列表一致：组委会账号只进管理员侧导出。此前组委会侧导出
     # 是 User.objects.all()，连管理员账号都整表带出；管理员侧则漏了市州/组委会。
     qs = User.objects.filter(type__in=ADMIN_USER_TYPES if show_committee else COMMITTEE_USER_TYPES)
-    rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "所属市州", "备注"]]
-    # 批量查市州昵称，避免逐行 N+1 查询；parent_id=0/None 对应空市州。
-    city_ids = {u.parent_id for u in qs if u.parent_id}
-    city_names = dict(User.objects.filter(id__in=city_ids).values_list("id", "nickname")) if city_ids else {}
-    rows += [[
-        x.username, x.nickname,
-        "初始密码为scdyz@2023，请登陆系统后修改密码，密码找回请联系省级行政部门。",
-        x.leader, x.tel, city_names.get(x.parent_id, ""), x.description,
-    ] for x in qs]
+    rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "备注"]]
+    rows += [[x.username, x.nickname, "初始密码为scylb@2026", x.leader, x.tel, x.description] for x in qs]
     return xlsx_response(rows, request.auth.username + ".xlsx")
 
 
