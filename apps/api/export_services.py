@@ -57,9 +57,21 @@ INSTRUMENTS = (
     "打击乐", "低音大提琴", "其他",
 )
 
+# 【合并说明：这是 master 新列结构 ∪ zyr 的「身份证后6位」列，不是二选一】
+#   · master 侧把本表按《附件2 报名信息表》重整了列序（领队姓名、指导老师 1/2 双槽
+#     + 各自电话、乐团类别、参展组别、参展人数，尾部 备注/用餐预约），并**整列删掉了
+#     指挥身份证 / 指导老师身份证**；
+#   · zyr 侧把这两列改名为「指挥身份证后6位」「指导老师身份证后6位」，其余不动。
+# 合并结果 = master 的新列结构，并把两张身份证列按 zyr 的口径插回**各自人物列的紧邻位置**：
+#   指挥身份证后6位 紧跟「指挥电话」；指导老师身份证后6位 紧跟「指导老师2电话」
+#   （master 把指导老师拆成 1/2 两槽，卡片列仍只有一张，与 zyr 原有的「一张指导老师卡」
+#    语义一致 —— 槽内多人的卡号用「、」相连，和 指导老师2 的姓名合并规则相同）。
+# 因此列数 17 + 2 = 19，加 17 乐器栏 + 合计/备注/用餐预约 共 39 栏。
+# admin_data2_rows() 的每一行必须与这个列表逐位对齐（下面 _export_card 取卡号）。
 ADMIN_DATA2_HEADINGS = [
     "序号", "报名学校", "参展学校名称", "乐团名称", "领队姓名", "领队电话",
-    "指挥", "指挥电话", "指导老师1", "指导老师1电话", "指导老师2", "指导老师2电话",
+    "指挥", "指挥电话", "指挥身份证后6位",
+    "指导老师1", "指导老师1电话", "指导老师2", "指导老师2电话", "指导老师身份证后6位",
     "乐团类别", "参展组别", "指定曲目", "自选曲目", "参展人数",
     *INSTRUMENTS,
     "合计", "备注", "用餐预约",
@@ -227,6 +239,18 @@ def _headcount(formal, reserve):
     return f"正式队员 {len(formal)} 人，预备队员 {len(reserve)} 人"
 
 
+def _export_card(person):
+    """data2 身份证后6位栏的单元格文本。
+
+    前缀单引号是**沿用改造前就有的写法**（Laravel 时代对 18 位全号防止被 Excel
+    转成科学计数法），zyr 侧改名时保留了它，本次合并原样保留、不引入新行为。
+    注意 Card 只有 6 位，前导 0 必须保住 —— openpyxl 写入 str 本身就是文本单元格，
+    单引号在 Excel 里会**显示出来**，这是既有观感问题，不在本次合并范围内。
+    """
+    return "'" + str(getattr(person, "card", "") or "")
+
+
+
 def _instrument_roster(members):
     """正式队员按乐器名单（附件2「正式队员名单」栏）：只列有人的乐器槽，换行分隔。"""
     names = {key: [] for key in INSTRUMENTS}
@@ -236,10 +260,15 @@ def _instrument_roster(members):
 
 
 def _meal_and_remark(report):
-    """用餐预约归位到官方 6 个时段，无法归位的条目并入备注（与报名信息表 PDF 同口径）。"""
+    """用餐预约归位到官方 6 个时段，无法归位的条目并入备注（与报名信息表 PDF 同口径）。
+
+    人数格（dinner_reservation_counts，_meal_cells 合并后为数字文本）在时段名后
+    补「（N人）」；纯勾选格维持只列时段名的旧文本。
+    """
     from apps.api.registration_form import MEALS, _meal_cells
     cells, leftovers = _meal_cells(report)
-    meals = "、".join(label for label, mark in zip(MEALS, cells) if mark)
+    meals = "、".join(label if mark == "√" else f"{label}（{mark}人）"
+                      for label, mark in zip(MEALS, cells) if mark)
     parts = [str(report.remark or "")]
     if leftovers:
         parts.append("用餐预约：" + "、".join(leftovers))
@@ -354,6 +383,14 @@ def admin_data2_rows(reports: Iterable[Report]) -> list[list]:
             members.get(2, []), members.get(4, []), _conductor_type(grouped, item.id),
             _conductor_order(grouped, item.id))
         (teacher1_name, teacher1_phone), (teacher2_name, teacher2_phone) = _adviser_slots(teachers)
+        # 与 ADMIN_DATA2_HEADINGS 里的两张身份证列逐位对齐：指挥栏取全部指挥的卡号，
+        # 指导老师栏取**渲染进两个槽位的全部指导老师**（含被并入第 2 槽的多人），
+        # 空卡号不占位，多人用「、」相连 —— 与同列姓名/电话的合并规则一致。
+        conductor_cards = "、".join(
+            _export_card(person) for person in members.get(2, [])
+            if getattr(person, "card", ""))
+        adviser_cards = "、".join(
+            _export_card(person) for person in teachers if getattr(person, "card", ""))
         meals, remark = _meal_and_remark(item)
         rows.append([
             index,
@@ -364,7 +401,9 @@ def admin_data2_rows(reports: Iterable[Report]) -> list[list]:
             item.contact_phone or "",
             conductor_name,
             conductor_phone,
+            conductor_cards,
             teacher1_name, teacher1_phone, teacher2_name, teacher2_phone,
+            adviser_cards,
             item.establishment or "",
             item.group or "",
             item.name1 or "",

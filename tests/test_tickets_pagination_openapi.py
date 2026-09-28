@@ -5,7 +5,7 @@ from django.utils import timezone
 
 from apps.core.models import Ticket, TicketSubscribe
 
-from .base import ApiTestCase
+from .base import ApiTestCase, card_for
 
 
 class TicketCapacityTests(ApiTestCase):
@@ -32,30 +32,71 @@ class TicketCapacityTests(ApiTestCase):
             )
 
     def test_duplicate_identity_is_rejected_before_capacity_check(self):
-        first = self.book("张三", "card-1")
-        duplicate = self.book("张三", "card-1")
+        """同名 + 同后 6 位 + 同场次 = 重复预约，在容量判断之前就被拦下。"""
+        first = self.book("张三", card_for("ticket1"))
+        duplicate = self.book("张三", card_for("ticket1"))
 
         self.assertEqual(first.json()["code"], 0)
         self.assertEqual(duplicate.json()["code"], 1)
         self.assertEqual(duplicate.json()["msg"], "已预约成功该场观展！")
         self.assertEqual(TicketSubscribe.objects.count(), 1)
 
-    def test_capacity_rejects_a_different_identity_after_last_seat(self):
-        self.book("张三", "card-1", remote_addr="10.0.0.1")
+    def test_same_last6_with_different_name_is_not_a_duplicate(self):
+        """【2026-09-23 口径变更】card 只剩后 6 位，撞号是常态，判重必须带上姓名。
 
-        full = self.book("李四", "card-2", remote_addr="10.0.0.2")
+        改前按 (场次, card) 判重 —— 两个只是碰巧同后 6 位的真人，第二个会被
+        直接回「已预约成功该场观展！」，而他其实从没预约过。这条测试锁住修复。
+        """
+        first = self.book("张三", card_for("ticket1"), remote_addr="10.0.0.1")
+        other = self.book("李四", card_for("ticket1"), remote_addr="10.0.0.2")
+        # 本用例的场次容量是 1，所以第二个人应当撞在容量上，而不是被判重复
+        self.assertEqual(first.json()["code"], 0)
+        self.assertEqual(other.json()["msg"], "已预约满！")
+        self.assertEqual(TicketSubscribe.objects.count(), 1)
+
+    def test_capacity_rejects_a_different_identity_after_last_seat(self):
+        self.book("张三", card_for("ticket1"), remote_addr="10.0.0.1")
+
+        full = self.book("李四", card_for("ticket2"), remote_addr="10.0.0.2")
 
         self.assertEqual(full.json()["code"], 1)
         self.assertEqual(full.json()["msg"], "已预约满！")
         self.assertEqual(TicketSubscribe.objects.count(), 1)
         self.assertEqual(TicketSubscribe.objects.get().ip, "10.0.0.1")
 
+    def test_invalid_card_is_rejected_and_normalized_value_is_stored(self):
+        """卡号必须是后 6 位；末位小写 x 归一成大写 X 后入库。"""
+        bad = self.book("张三", "12345")
+        self.assertEqual(bad.json()["code"], 1)
+        self.assertEqual(bad.json()["msg"], "身份证后6位应为6位，前5位为数字，末位为数字或X")
+
+        ok = self.book("张三", "12345x")
+        self.assertEqual(ok.json()["code"], 0)
+        self.assertEqual(TicketSubscribe.objects.get().card, "12345X")
+
+    def test_lookup_accepts_lowercase_x(self):
+        """查询同样要归一：库里存大写 X，用户输小写 x 必须能查到。"""
+        self.book("张三", card_for("ticket1"))
+        stored = TicketSubscribe.objects.get().card
+        # 造一个末位是 X 的场景，验证大小写不敏感
+        TicketSubscribe.objects.filter(pk=TicketSubscribe.objects.get().pk).update(
+            card="12345X"
+        )
+
+        hit = self.client.get("/api/ticket/my", {"name": "张三", "card": "12345x"}).json()
+        miss = self.client.get("/api/ticket/my", {"name": "张三", "card": "12345"}).json()
+
+        self.assertEqual(len(hit["data"]), 1)
+        self.assertEqual(hit["data"][0]["card"], "12345X")
+        self.assertEqual(miss["data"], [])   # 格式不合法 → 空结果，不是 500
+        self.assertEqual(len(stored), 6)
+
     def test_public_lookup_returns_booking_and_nested_ticket(self):
-        booked = self.book("张三", "card-1").json()["data"]
+        booked = self.book("张三", card_for("ticket1")).json()["data"]
 
         message = self.client.get(f"/api/ticket/message/{booked['code']}").json()
         mine = self.client.get(
-            "/api/ticket/my", {"name": "张三", "card": "card-1"}
+            "/api/ticket/my", {"name": "张三", "card": card_for("ticket1")}
         ).json()
 
         self.assertEqual(message["code"], 0)

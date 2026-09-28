@@ -7,7 +7,7 @@ from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
-from .models import Files, Person, Report, ReportDraft, ReportPerson, User
+from .models import Files, Person, Report, ReportDraft, ReportPerson, User, normalize_card
 from .services import attach_report_people, store_people
 
 # 正式报名数上限（未软删；驳回态 status=-1 与待审核态 status=0 同样占额度，
@@ -52,11 +52,24 @@ REPORT_FIELDS = {
     "choir_name", "name", "name1", "school_name", "desc", "group",
     "establishment", "establishment_name", "contact_name", "contact_phone",
     "contact_way", "time_length", "spectrum", "file", "dinner_reservation",
-    "remark", "person",
+    "dinner_reservation_counts", "remark", "person",
 }
 SERVER_FIELDS = {"user_id", "scope", "status", "report_id", "draft_id", "version",
                  "created_at", "updated_at", "submitted_at"}
-PERSON_FIELDS = {"id", "name", "card", "age", "school", "phone", "gender",
+# `id` 与 `person_id` 是同一个东西：要复用的 Person 主键。
+#   · `id` 是历史键名，前端 draftPayload.js 一直在发，payload_from_report() 回吐时也写 `id`；
+#   · `person_id` 是新接口约定的名字。
+# 两个都收（收进来后统一存在 `id` 上），否则就是半迁移状态：老前端发 `id`、
+# 新前端发 `person_id`，只能有一边能用。注意这一条是**精确白名单**，
+# 白名单里没有的键会让整个暂存/提交 400（见 draftPayload.js 里记载的那次事故）。
+#
+# 【合并说明：这里必须是两边的并集】
+#   · person_id —— 来自身份证后 6 位改造（复用 Person 的显式引用，身份基准）；
+#   · signature_order / display_order —— 来自 master（署名顺序、指导教师表内行下标）。
+#   少任何一个都会造成「前端发得出、后端 400 判为不允许字段」，且报错文案
+#   （person[N] 存在不允许字段）用户看不懂。因此白名单是 superset：
+#   前端少发键是安全的（_person() 会补 None），多发未列出的键才会 400。
+PERSON_FIELDS = {"id", "person_id", "name", "card", "age", "school", "phone", "gender",
                  "major", "head", "instrument", "other", "remark", "position", "type",
                  "signature_order", "display_order"}
 
@@ -258,9 +271,20 @@ def _person(item, index, complete=False):
     if unknown:
         raise DraftError("person[%s] 存在不允许字段" % index, {"fields": sorted(unknown)})
     result = {}
-    result["id"] = str(item["id"]) if item.get("id") is not None else None
+    # 统一存到 `id`：下游 store_people 只需认一个键。
+    # 两个都给时以 person_id 为准（新键名优先，避免老键残留值静默覆盖新值）。
+    reference = item.get("person_id", item.get("id"))
+    result["id"] = str(reference) if reference not in (None, "") else None
     result["name"] = _string(item.get("name"), "person[%s].name" % index, complete)
-    result["card"] = _string(item.get("card"), "person[%s].card" % index, complete)
+    card = _string(item.get("card"), "person[%s].card" % index, complete)
+    if complete:
+        # 提交时卡死后 6 位格式；暂存（complete=False）故意放行半成品，
+        # 否则用户填到一半就存不了草稿。归一（x→X）在这里做掉，
+        # 保证 payload 里存的和最终落库的完全一致。
+        ok, card = normalize_card(card)
+        if not ok:
+            raise DraftError("person[%s].card %s" % (index, card))
+    result["card"] = card
     for field in ("school", "phone", "gender", "major", "head", "instrument", "other", "remark"):
         result[field] = _string(item.get(field), "person[%s].%s" % (index, field))
     result["age"] = _integer(item.get("age"), "person[%s].age" % index)
@@ -270,6 +294,37 @@ def _person(item, index, complete=False):
     result["signature_order"] = _integer(item.get("signature_order"), "person[%s].signature_order" % index, False, 1)
     # 表内行下标：可空；填了必须 ≥0 的整数（下标从 0 起，故下限是 0 不是 1）
     result["display_order"] = _integer(item.get("display_order"), "person[%s].display_order" % index, False, 0)
+    return result
+
+
+# 官方用餐时段数（apps/api/registration_form.MEALS 的长度）；core 不反向依赖 api
+_DINNER_SLOTS = 6
+
+
+def _dinner_counts(value, field):
+    """用餐预约人数（草稿路径严格校验）：null 或 ≤6 长度数组，元素 null/非负整数。
+
+    与 dinner_reservation 并行、按下标对齐 6 个官方用餐时段，counts[i]>0 表示
+    第 i 时段订 N 人。0 是合法值（明确占位）；负数/非整数/超长直接 400。
+    直传 create/update_report 路径的宽松规整在 services._dinner_counts。
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise DraftError("%s 必须是数组" % field)
+    if len(value) > _DINNER_SLOTS:
+        raise DraftError("%s 最多 %d 项（对应 6 个用餐时段）" % (field, _DINNER_SLOTS))
+    result = []
+    for index, item in enumerate(value):
+        if item is None:
+            result.append(None)
+            continue
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise DraftError("%s[%s] 必须是 null 或整数" % (field, index))
+        if item < 0:
+            raise DraftError("%s[%s] 不能小于 0" % (field, index))
+        result.append(item)
+    result += [None] * (_DINNER_SLOTS - len(result))
     return result
 
 
@@ -294,6 +349,8 @@ def normalize_draft_payload(raw):
             if value is not None and not isinstance(value, (list, dict)):
                 raise DraftError("dinner_reservation 必须是数组或对象")
             result[field] = value
+        elif field == "dinner_reservation_counts":
+            result[field] = _dinner_counts(value, field)
         else:
             result[field] = _string(value, field, maximum=_FIELD_LIMITS.get(field, 255))
     people = raw.get("person", [])
@@ -328,6 +385,8 @@ def payload_from_report(report):
     result["spectrum"] = str(report.spectrum) if report.spectrum is not None else None
     result["file"] = str(report.file) if report.file is not None else None
     result["dinner_reservation"] = report.dinner_reservation or []
+    # 与 dinner_reservation 同款：空列回显 []（前端把 null/[] 都当「未填」即可）
+    result["dinner_reservation_counts"] = report.dinner_reservation_counts or []
     result["person"] = []
     for link in ReportPerson.objects.filter(report_id=report.id):
         person = Person.objects.filter(pk=link.person_id).first()

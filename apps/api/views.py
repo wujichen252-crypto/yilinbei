@@ -24,7 +24,7 @@ from ninja.errors import HttpError
 from apps.core.models import (Crew, Draw, Files, Leader, LiveReport, Logs,
                               Person, PersonalAccessToken, Report, ReportDraft,
                               ReportPerson, Recommend, ScanFiles, Ticket,
-                              TicketSubscribe, User)
+                              TicketSubscribe, User, normalize_card)
 from apps.core.report_drafts import (
     DraftError, DraftIntegrityError, DraftNotFound, DraftConflict,
     ReportNotRejected, ReportQuotaExceeded,
@@ -35,8 +35,8 @@ from apps.core.report_drafts import (
     update_draft, update_rejected_report_from_submission,
 )
 from apps.core.services import (BodyError, attach_report_people, failure,
-                                list_page, live_report_dict, model_dict,
-                                new_code, parse_body, report_dict,
+                                _dinner_counts, list_page, live_report_dict,
+                                model_dict, new_code, parse_body, report_dict,
                                 report_rule_message, store_people, success,
                                 subordinate_school_ids, user_dict,
                                 valid_person_head, verify_user_password,
@@ -151,8 +151,11 @@ def create_report(request, province=False):
                 payload.pop(key, None)
             if not province:
                 payload["dinner_reservation"] = data.get("dinner_reservation") or []
+                payload["dinner_reservation_counts"] = _dinner_counts(
+                    data.get("dinner_reservation_counts"))
             else:
                 payload.pop("dinner_reservation", None)
+                payload.pop("dinner_reservation_counts", None)
             report = Report.objects.create(user_id=user.id, **payload)
             attach_report_people(report.id, stored)
     except IntegrityError as exc:
@@ -186,10 +189,14 @@ def update_report(request, on_behalf=False):
             fields = {f.name for f in Report._meta.fields}
             fields -= {"id", "created_at", "updated_at", "deleted_at", "user_id"}
             for key, value in data.items():
-                if key in fields and key not in {"status", "dinner_reservation"}:
+                if key in fields and key not in {"status", "dinner_reservation",
+                                                 "dinner_reservation_counts"}:
                     setattr(report, key, value)
             if "dinner_reservation" in fields:
                 report.dinner_reservation = data.get("dinner_reservation") or []
+                # 与 dinner_reservation 同款语义：漏传该键视为清空（现状口径）
+                report.dinner_reservation_counts = _dinner_counts(
+                    data.get("dinner_reservation_counts"))
             if not on_behalf:
                 report.user_id = user.id
             report.status = 0
@@ -454,10 +461,34 @@ def live_update(request):
         fields = {f.name for f in LiveReport._meta.fields} - {"id", "created_at", "updated_at", "user_id"}
         for k, v in data.items():
             if k in fields and k not in {"leader", "crew"}: setattr(obj, k, v)
+        # 先整批校验（含身份证后 6 位），再删除重建 —— 校验失败时不能留下「删了没建」的
+        # 半截状态。原实现是先删后建，任一行的字段非法都会让这张现场报名表的人员凭空清空。
+        prepared = []
+        for key, model, label in (("leader", Leader, "领队"), ("crew", Crew, "工作人员")):
+            rows = data.get(key, [])
+            if not isinstance(rows, list):
+                transaction.set_rollback(True)
+                return response(failure("%s 必须是数组" % label))
+            allowed = {f.name for f in model._meta.fields} - {"id", "live_report_id", "created_at", "updated_at"}
+            for item in rows:
+                if not isinstance(item, dict):
+                    transaction.set_rollback(True)
+                    return response(failure("%s数据格式不正确" % label))
+                values = {k: v for k, v in item.items() if k in allowed}
+                if values.get("card") not in (None, ""):
+                    ok, card = normalize_card(values["card"])
+                    if not ok:
+                        transaction.set_rollback(True)
+                        return response(failure("%s %s：%s" % (label, values.get("name") or "", card)))
+                    values["card"] = card
+                else:
+                    # 允许只填姓名：空值存 NULL，不要 " " 占位（见 models.Crew.card）
+                    values["card"] = None
+                prepared.append((model, values))
         obj.status = 0; obj.save()
         Leader.objects.filter(live_report_id=obj.id).delete(); Crew.objects.filter(live_report_id=obj.id).delete()
-        for item in data.get("leader", []): Leader.objects.create(live_report_id=obj.id, **{k: v for k, v in item.items() if k in {f.name for f in Leader._meta.fields} - {"id", "live_report_id", "created_at", "updated_at"}})
-        for item in data.get("crew", []): Crew.objects.create(live_report_id=obj.id, **{k: v for k, v in item.items() if k in {f.name for f in Crew._meta.fields} - {"id", "live_report_id", "created_at", "updated_at"}})
+        for model, values in prepared:
+            model.objects.create(live_report_id=obj.id, **values)
     write_log(request.auth, 1, "更新现场报名表 " + str(obj.name))
     return response(success("操作成功！", None))
 
@@ -512,9 +543,26 @@ def admin_recommend_list(request):
     return err or response(list_page(Recommend.objects.all().order_by("-created_at"), request, recommend_dict))
 
 
-def user_list(request):
-    # 省级（4）为无效数据，admin 与 committee 展示学校（0）、市级（1）与中小学端（5）
-    allowed_types = (0, 1, User.TYPE_PRIMARY_SECONDARY)
+# 用户管理两侧的数据范围口径：省级（4）为无效数据，任何一侧不出现；
+# 学校（0）、市州（1）、中小学端（5）两侧都有；组委会（2）只在管理员侧
+# 展示/导出（2026-09-28 起）；管理员（3）任何一侧都不可见、不可触达。
+COMMITTEE_USER_TYPES = (0, 1, User.TYPE_PRIMARY_SECONDARY)
+ADMIN_USER_TYPES = COMMITTEE_USER_TYPES + (User.TYPE_COMMITTEE,)
+
+
+def _committee_type_scope(request):
+    """组委会（type=2）调用方的用户管理目标范围：只能是市州/学校/中小学账号。
+
+    越界目标（管理员、其他组委会账号）与「不存在」同判，不暴露其存在性；
+    管理员调用方不设限。范围与 user_list 的展示口径一致。
+    """
+    return Q(type__in=COMMITTEE_USER_TYPES) if request.auth.type == User.TYPE_COMMITTEE else Q()
+
+
+def user_list(request, show_committee=False):
+    # 组委会（2）此前管理员创建后在列表里找不到，页面无从重置密码/修改；
+    # 2026-09-28 起管理员侧放开展示，组委会侧维持不见其他组委会账号。
+    allowed_types = ADMIN_USER_TYPES if show_committee else COMMITTEE_USER_TYPES
     qs = User.objects.filter(type__in=allowed_types).order_by("id"); keyword = request.GET.get("keyword")
     if keyword: qs = qs.filter(Q(username__icontains=keyword) | Q(tel__icontains=keyword) | Q(nickname__icontains=keyword))
     nickname = request.GET.get("nickname")
@@ -601,7 +649,8 @@ def _apply_can_report_twice(user, data):
 
 
 def user_update_admin(request):
-    data = body(request); user = User.all_objects.filter(pk=data.get("id")).first()
+    data = body(request)
+    user = User.all_objects.filter(Q(pk=data.get("id")) & _committee_type_scope(request)).first()
     if not user: return response(failure("用户不存在"))
     # can_report_twice 是报名特许、parent_id 是所属市州，都只能由管理员/组委会授予，
     # 不能让学校自助提权；两个字段的类型判据交给下面的 helper。
@@ -655,22 +704,26 @@ def user_create_admin(request, committee=False):
 
 def user_delete_admin(request):
     ids = request_ids(request, body(request))
+    # 组委会侧只能删 COMMITTEE_USER_TYPES 范围内的账号，管理员侧不设限。
     # 软删前先把下属账号的 parent_id 归零，避免市州被删后中小学账号 parent_id 悬空
     # （parent 外键 db_constraint=False + on_delete=DO_NOTHING，不会级联，必须手动清理）。
     children = User.objects.filter(parent_id__in=ids)
     if children.exists():
         children.update(parent_id=0)
-    User.objects.filter(id__in=ids).exclude(id=1).update(deleted_at=timezone.now())
+    User.objects.filter(Q(id__in=ids) & _committee_type_scope(request)).exclude(id=1).update(deleted_at=timezone.now())
     return response(success())
 
 
 def user_restore_admin(request):
-    ids = request_ids(request, body(request)); User.all_objects.filter(id__in=ids).update(deleted_at=None)
+    ids = request_ids(request, body(request))
+    User.all_objects.filter(Q(id__in=ids) & _committee_type_scope(request)).update(deleted_at=None)
     return response(success())
 
 
-def user_export_admin(request):
-    qs = User.objects.all() if request.auth.type == 2 else User.objects.filter(type__in=(0, User.TYPE_PRIMARY_SECONDARY))
+def user_export_admin(request, show_committee=False):
+    # 导出范围与用户列表一致：组委会账号只进管理员侧导出。此前组委会侧导出
+    # 是 User.objects.all()，连管理员账号都整表带出；管理员侧则漏了市州/组委会。
+    qs = User.objects.filter(type__in=ADMIN_USER_TYPES if show_committee else COMMITTEE_USER_TYPES)
     rows = [["账号", "名称", "密码", "修改人姓名", "修改人联系方式", "所属市州", "备注"]]
     # 批量查市州昵称，避免逐行 N+1 查询；parent_id=0/None 对应空市州。
     city_ids = {u.parent_id for u in qs if u.parent_id}
@@ -688,7 +741,9 @@ def register_user_routes(prefix, expected):
     committee = expected == 2
     @api.get(prefix + "/user/list", auth=auth, operation_id=tag + "_user_list")
     def _list(request):
-        err = role_error(request, expected); return err or user_list(request)
+        err = role_error(request, expected)
+        # 组委会账号（type=2）只进管理员侧列表；组委会侧维持隐藏
+        return err or user_list(request, show_committee=(expected == 3))
     @api.put(prefix + "/user/", auth=auth, operation_id=tag + "_user_update")
     def _update(request):
         err = role_error(request, expected); return err or user_update_admin(request)
@@ -700,14 +755,16 @@ def register_user_routes(prefix, expected):
         err = role_error(request, expected); return err or user_create_admin(request, committee)
     @api.get(prefix + "/user/export", auth=auth, operation_id=tag + "_user_export")
     def _export(request):
-        err = role_error(request, expected); return err or user_export_admin(request)
+        err = role_error(request, expected)
+        # 导出与列表同一口径：组委会账号只进管理员侧导出
+        return err or user_export_admin(request, show_committee=(expected == 3))
     @api.delete(prefix + "/user/", auth=auth, operation_id=tag + "_user_delete")
     def _delete(request):
         err = role_error(request, expected); return err or user_delete_admin(request)
     @api.get(prefix + "/user/{id}", auth=auth, operation_id=tag + "_user_info")
     def _info(request, id: int):
         err = role_error(request, expected)
-        user = User.objects.filter(pk=id).first()
+        user = User.objects.filter(Q(pk=id) & _committee_type_scope(request)).first()
         return err or response(success("获取成功", user_dict(user)))
 
 
@@ -746,8 +803,16 @@ def admin_person_update(request):
     if not obj: return response(failure("人员不存在"))
     if "head" in data and not valid_person_head(data["head"]):
         return response(failure("头像地址必须为空，且只能使用已配置 OSS/CDN 域名的 http/https 地址"))
+    if "card" in data:
+        ok, card = normalize_card(data["card"])
+        if not ok:
+            return response(failure(card))
+        data = dict(data, card=card)
+    # user_id 不接受后台改写：人员归属单位决定谁能复用它（见 store_people 的授权校验），
+    # 允许在这里改等于给了一条把人员过户到别的单位、再合法复用的旁路。
+    editable = {f.name for f in Person._meta.fields} - {"id", "created_at", "updated_at", "user_id"}
     for k, v in data.items():
-        if k in {f.name for f in Person._meta.fields} and k not in {"id", "created_at", "updated_at"}: setattr(obj, k, v)
+        if k in editable: setattr(obj, k, v)
     obj.save(); return response(success())
 
 
@@ -1286,16 +1351,25 @@ def ticket_message(request, code: str):
 
 @api.get("/ticket/my")
 def my_ticket(request):
-    qs = TicketSubscribe.objects.filter(name=request.GET.get("name"), card=request.GET.get("card")).order_by("ticket_id")
+    # 查询条件里的 card 必须先归一：库里存的是大写 X，用户输小写 x 时要能查到同一张票。
+    # 格式不合法时不再拿原串去查（那必然查不到，还会让调用方以为是「没预约」），
+    # 直接返回空列表 —— 与原实现「card 缺失即查不到」的表现一致。
+    ok, card = normalize_card(request.GET.get("card"))
     result = []
-    for item in qs:
-        d = model_dict(item); d["ticket"] = model_dict(Ticket.objects.filter(pk=item.ticket_id).first()); result.append(d)
+    if ok:
+        qs = TicketSubscribe.objects.filter(name=request.GET.get("name"), card=card).order_by("ticket_id")
+        for item in qs:
+            d = model_dict(item); d["ticket"] = model_dict(Ticket.objects.filter(pk=item.ticket_id).first()); result.append(d)
     return response(success("获取成功！", result))
 
 
 @api.post("/ticket/make")
 def make_ticket(request):
     data = body(request)
+    ok, card = normalize_card(data.get("card"))
+    if not ok:
+        return response(failure(card))
+    name = data.get("name", "")
     with transaction.atomic():
         # This is the original fixed closing time; deployments may disable this
         # check only through an explicit business change review.
@@ -1304,13 +1378,20 @@ def make_ticket(request):
                 return response(failure("未到预约时间！"))
         except ValueError:
             pass
-        if TicketSubscribe.objects.select_for_update().filter(ticket_id=data.get("ticket_id"), card=data.get("card")).exists():
+        # 【去重口径随 card 语义一起改】原先按 (场次, card) 判重，那是因为 card 是完整
+        # 身份证、能唯一标识一个人。现在 card 只剩后 6 位，10^6 种取值必然碰撞 ——
+        # 继续按 (场次, card) 去重会把「同后 6 位的另一个真人」直接判成重复预约，
+        # 而系统无法从后 6 位分辨他们，所以判重必须把姓名一起算进去。
+        # 代价：同一个人改个写法（「张三」→「张 三」）能重复预约。这是后 6 位方案
+        # 固有的可预约上限，不是本函数的缺陷，已在实施报告中列为已知取舍。
+        if TicketSubscribe.objects.select_for_update().filter(
+                ticket_id=data.get("ticket_id"), card=card, name=name).exists():
             return response(failure("已预约成功该场观展！"))
         ticket = Ticket.objects.select_for_update().filter(pk=data.get("ticket_id")).first()
         if not ticket: return response(failure("票不存在！"))
         if TicketSubscribe.objects.filter(ticket_id=ticket.id).count() >= ticket.number:
             return response(failure("已预约满！"))
-        obj = TicketSubscribe.objects.create(ticket_id=ticket.id, name=data.get("name", ""), card=data.get("card", ""), phone=data.get("phone", ""), ip=request.META.get("REMOTE_ADDR", ""), code=new_code())
+        obj = TicketSubscribe.objects.create(ticket_id=ticket.id, name=name, card=card, phone=data.get("phone", ""), ip=request.META.get("REMOTE_ADDR", ""), code=new_code())
     return response(success("预约成功！", model_dict(obj)))
 
 
@@ -1320,12 +1401,26 @@ OSS_BIZ_RULES = {
     # biz: (中文名, 大小上限字节, 允许的 content type)
     "video": ("视频", 700 * 1024 * 1024, {"video/mp4", "video/quicktime"}),
     "image": ("图片", 1 * 1024 * 1024, {"image/jpeg", "image/png"}),
+    # 师生照片（报名表参演人员/教师头像）单独一条 biz，只约束它自己。
+    # 领队头像、成员头像继续走 "image"（1MB），改这里不影响它们。
+    "student_photo": ("师生照片", 100 * 1024, {"image/jpeg", "image/png"}),
     "photo": ("照片", 20 * 1024 * 1024, {"image/jpeg", "image/tiff"}),
     "spectrum": ("曲谱", 20 * 1024 * 1024, {"application/pdf"}),
     "doc": ("文件", 20 * 1024 * 1024, {"application/pdf"}),
 }
 OSS_STS_ACTIONS = ["oss:PutObject", "oss:AbortMultipartUpload",
                    "oss:ListParts", "oss:ListMultipartUploads"]
+
+
+def _oss_limit_text(max_bytes):
+    """上限的中文文案：不足 1MB 用 KB，否则用 MB。
+
+    既有的 biz 上限都是 1MB 的整数倍，输出与改动前逐字相同；只有新增的
+    师生照片（100KB）会走 KB 分支，避免提示出现「不能超过0MB」。
+    """
+    if max_bytes < 1024 * 1024:
+        return f"{max_bytes // 1024}KB"
+    return f"{max_bytes // (1024 * 1024)}MB"
 
 
 def oss_configured():
@@ -1381,7 +1476,7 @@ def oss_token(request):
     except (TypeError, ValueError):
         return response(failure("fileSize不合法"))
     if file_size <= 0 or file_size > max_bytes:
-        return response(failure(f"{biz_name}大小不能超过{max_bytes // (1024 * 1024)}MB"))
+        return response(failure(f"{biz_name}大小不能超过{_oss_limit_text(max_bytes)}"))
     content_type = str(data.get("contentType") or "")
     if content_type not in allowed_types:
         return response(failure("不支持的文件类型"))
@@ -1425,6 +1520,7 @@ def oss_token(request):
 OSS_EXT_RULES = {
     # 代理上传按扩展名校验：浏览器对 tiff 等类型常给出空 MIME，不可靠
     "image": {".jpg", ".jpeg", ".png"},
+    "student_photo": {".jpg", ".jpeg", ".png"},
     "photo": {".jpg", ".jpeg", ".tif", ".tiff"},
     "spectrum": {".pdf"},
     "doc": {".pdf"},
@@ -1457,7 +1553,7 @@ def oss_upload(request):
         return response(failure("缺少文件"))
     biz_name, max_bytes, allowed_types = OSS_BIZ_RULES[biz]
     if f.size > max_bytes:
-        return response(failure(f"{biz_name}大小不能超过{max_bytes // (1024 * 1024)}MB"))
+        return response(failure(f"{biz_name}大小不能超过{_oss_limit_text(max_bytes)}"))
     dot = f.name.rfind(".")
     ext = f.name[dot:].lower() if dot >= 0 else ""
     if ext not in OSS_EXT_RULES[biz]:
