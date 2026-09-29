@@ -334,6 +334,11 @@ def user_update(request):
         if key in data:
             setattr(user, key, data[key])
     if data.get("password"):
+        # 自助改密必须先核对原密码。用 verify_user_password（兼容 Laravel 遗留的
+        # $2y$ bcrypt 摘要，与登录接口一致）；原密码缺失或错误一律拒绝。
+        # 注意：必须在此之前 return，避免出现"密码没改成、资料却被写入"的半截落库。
+        if not verify_user_password(user, data.get("old_password") or ""):
+            return response(failure("当前密码不正确"))
         user.set_password(data["password"])
     user.save()
     write_log(request.auth, 1, "修改用户 " + user.username)
