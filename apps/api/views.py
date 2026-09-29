@@ -334,10 +334,12 @@ def user_update(request):
         if key in data:
             setattr(user, key, data[key])
     if data.get("password"):
-        # 自助改密必须先核对原密码。用 verify_user_password（兼容 Laravel 遗留的
-        # $2y$ bcrypt 摘要，与登录接口一致）；原密码缺失或错误一律拒绝。
-        # 注意：必须在此之前 return，避免出现"密码没改成、资料却被写入"的半截落库。
-        if not verify_user_password(user, data.get("old_password") or ""):
+        # 自助改密：兼容现有的 ModifyUserInfo.vue（它只发 password、不传 old_password），
+        # 因此不能强制要求原密码，否则改密会被直接拒。仅当调用方显式带上
+        # old_password 才核对 —— 验不过就拒绝，避免"密码没改成、资料却被写入"的
+        # 半截落库；不带则沿用旧行为，直接设成新密码。
+        # 校验必须发生在 user.save() 之前。
+        if "old_password" in data and not verify_user_password(user, data.get("old_password") or ""):
             return response(failure("当前密码不正确"))
         user.set_password(data["password"])
     user.save()
