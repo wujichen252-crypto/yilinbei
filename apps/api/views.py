@@ -1512,8 +1512,10 @@ def oss_token(request):
     }]}
     try:
         creds = _assume_oss_role(session_policy)["Credentials"]
-    except Exception:
-        write_log(request.auth, 5, "发放OSS上传凭证失败")
+    except Exception as exc:
+        # 阿里云侧的真实原因（网络不通/密钥无效/无 AssumeRole 权限）必须留痕，
+        # 否则线上只剩一句通用文案，跨环境排查无从下手
+        write_log(request.auth, 5, "发放OSS上传凭证失败：%s" % exc)
         return response(failure("获取上传凭证失败，请稍后重试"))
     host = oss_public_host()
     return response(success("", {
